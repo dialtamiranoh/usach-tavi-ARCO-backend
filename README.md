@@ -1,106 +1,291 @@
-# ARCO-backend
+# ARCO — Asistente para el Registro Civil y su Orientación
 
-Backend del proyecto ARCO (Asistente para el Registro Civil y su Orientacion).
+**Rama:** `feature/dynamic-llm`  
+**Sprint:** 2  
+**Última actualización:** Junio 2026
 
-## Como ejecutar este backend en otro computador
+---
 
-### 1. Clonar el repositorio
+## ¿Qué es ARCO?
 
-git clone <URL_DEL_REPO>
-cd ARCO-backend
+ARCO es un asistente conversacional que responde preguntas en lenguaje natural sobre trámites del Servicio de Registro Civil e Identificación de Chile. Su propósito es social: reducir fricción, evitar desplazamientos innecesarios y orientar a ciudadanos sobre requisitos, costos, canales y tiempos de entrega de cada trámite.
 
-### 2. Crear el entorno virtual
+**ARCO no ejecuta trámites ni captura datos personales. Es un sistema de orientación.**
 
-python3 -m venv .venv
+---
 
-### 3. Activar el entorno virtual
+## Novedades de esta versión (Sprint 2)
 
+### 1. Configuración dinámica del LLM via variables de entorno
+El modelo de lenguaje ya no está hardcodeado en el código. Se configura mediante un archivo `.env`, lo que permite cambiar entre modelos (Qwen, Granite, u otros) sin tocar `main.py`.
+
+### 2. RAG con ChromaDB e ingestión dinámica
+Se incorporó un pipeline de Retrieval-Augmented Generation (RAG) usando ChromaDB como base de datos vectorial y `paraphrase-multilingual-MiniLM-L12-v2` como modelo de embeddings. Esto permite búsqueda semántica sobre el corpus oficial.
+
+### 3. Script de ingestión `ingest.py`
+Permite agregar nuevos documentos (PDF, TXT) al corpus sin tocar el código. Incluye control de archivos ya procesados mediante hash MD5 para evitar reingestiones innecesarias.
+
+### 4. Keywords enriquecidas en `knowledge.json`
+Todos los trámites fueron enriquecidos con keywords semánticas adicionales para mejorar la precisión de la búsqueda RAG. Por ejemplo, "pasaporte" ahora incluye "viajar fuera de chile", "salir del pais", "documento para viajar".
+
+### 5. Prompt con clarificación de ambigüedades
+El sistema prompt fue actualizado para que ARCO haga preguntas de clarificación cuando la consulta es ambigua (por ejemplo, cuando no queda claro si el usuario es chileno o extranjero).
+
+### 6. CI/CD con GitHub Actions
+Pipeline de integración continua que se ejecuta automáticamente en cada push. Valida:
+- Sintaxis de `main.py`
+- Estructura y campos obligatorios de `knowledge.json`
+- Instalación de dependencias
+
+---
+
+## Stack tecnológico
+
+| Capa | Tecnología |
+|---|---|
+| Backend | Python 3.11 + FastAPI + Uvicorn |
+| Frontend | HTML5 + CSS3 + JavaScript vanilla |
+| LLM local | llama-cpp-python server (puerto 8001) |
+| Modelo por defecto | Qwen2.5-3B-Instruct Q4_K_M GGUF |
+| RAG | ChromaDB + sentence-transformers |
+| Embeddings | paraphrase-multilingual-MiniLM-L12-v2 |
+| Recuperación (fallback) | Keywords normalizados sobre knowledge.json |
+| CI/CD | GitHub Actions |
+| Control de versiones | GitHub (2 repositorios: frontend + backend) |
+
+---
+
+## Arquitectura
+
+![Arquitectura ARCO](Arquitectura.png)
+
+---
+
+## Requisitos previos
+
+- Python 3.11+
+- Git
+- 16 GB RAM recomendados
+- 10 GB de espacio libre en disco
+- Modelo `.gguf` descargado localmente
+- Windows 10+ / Linux / macOS
+
+---
+
+## Instalación
+
+### 1. Clonar los repositorios
+
+```bash
+git clone https://github.com/dialtamiranoh/usach-tavi-ARCO-backend.git
+git clone https://github.com/dialtamiranoh/usach-tavi-ARCO-frontend.git
+```
+
+### 2. Crear y activar el entorno virtual
+
+```bash
+# Crear venv en la carpeta padre
+python -m venv .venv
+
+# Windows
+.venv\Scripts\Activate.ps1
+
+# Linux / macOS
 source .venv/bin/activate
+```
 
-Si salio bien, deberia aparecer (.venv) al inicio de la terminal.
+### 3. Instalar dependencias del backend
 
-### 4. Instalar las dependencias del proyecto
-
+```bash
+cd usach-tavi-ARCO-backend
 pip install -r requirements.txt
-
-### 5. Instalar el servidor de llama-cpp-python
-
 pip install "llama-cpp-python[server]"
+```
 
-### 6. Tener un modelo local .gguf
+### 4. Configurar variables de entorno
 
-Cada integrante debe tener un modelo .gguf guardado en su computador.
+```bash
+# Copiar el archivo de ejemplo
+cp .env.example .env
+```
 
-Ejemplo de ruta:
-/home/USUARIO/models/qwen25-3b/Qwen2.5-3B-Instruct-Q4_K_M.gguf
+Editar `.env` con la ruta real al modelo:
 
-La ruta cambia segun el computador de cada integrante.
+```env
+LLM_URL=http://127.0.0.1:8001/v1/chat/completions
+LLM_MODEL=arco-llm
+LLM_MODEL_PATH=C:/Users/TU_USUARIO/models/qwen2.5-3b-instruct-q4_k_m.gguf
+LLM_TEMPERATURE=0.1
+LLM_MAX_TOKENS=140
+LLM_N_CTX=2048
+USE_RAG=false
+```
 
-### 7. Levantar el modelo local
+### 5. Descargar el modelo
 
-Abrir una terminal nueva dentro de la carpeta del proyecto y ejecutar:
+```bash
+hf download Qwen/Qwen2.5-3B-Instruct-GGUF qwen2.5-3b-instruct-q4_k_m.gguf --local-dir "C:/Users/TU_USUARIO/models"
+```
 
-cd ~/ARCO-backend
-source .venv/bin/activate
-python -m llama_cpp.server --model "/RUTA/AL/MODELO.gguf" --host 127.0.0.1 --port 8001 --model_alias arco-llm --n_ctx 2048
+### 6. Ingestar el corpus (solo si USE_RAG=true)
 
-Ejemplo:
+```bash
+python ingest.py
+```
 
-python -m llama_cpp.server --model "/home/USUARIO/models/qwen25-3b/Qwen2.5-3B-Instruct-Q4_K_M.gguf" --host 127.0.0.1 --port 8001 --model_alias arco-llm --n_ctx 2048
+---
 
-Esta terminal debe quedar abierta mientras el modelo este corriendo.
+## Ejecución
 
-### 8. Levantar el backend
+Abrir tres terminales con el venv activo:
 
-Abrir otra terminal nueva dentro de la carpeta del proyecto y ejecutar:
+### Terminal 1 — Modelo LLM
 
-cd ~/ARCO-backend
-source .venv/bin/activate
+```bash
+python -m llama_cpp.server \
+  --model "RUTA/AL/MODELO.gguf" \
+  --host 127.0.0.1 \
+  --port 8001 \
+  --model_alias arco-llm \
+  --n_ctx 2048
+```
+
+### Terminal 2 — Backend
+
+```bash
+cd usach-tavi-ARCO-backend
 uvicorn main:app --reload
+```
 
-Si todo salio bien, el backend quedara disponible en:
-http://127.0.0.1:8000
+### Terminal 3 — Frontend
 
-### 9. Probar ARCO
+```bash
+cd usach-tavi-ARCO-frontend
+python -m http.server 5500
+```
 
-Abrir en el navegador:
-http://127.0.0.1:8000/docs
+Abrir en el navegador: `http://127.0.0.1:5500`
 
-Ahi se puede probar el endpoint POST /ask.
+---
 
-### 10. Ejemplos de consultas
+## Uso del sistema
 
-{"query": "quiero renovar mi carnet de identidad"}
+### Consultas de ejemplo
 
-{"query": "quiero transferir un vehiculo"}
+| Consulta | Respuesta esperada |
+|---|---|
+| "quiero sacar mi pasaporte" | Canal mixto, costo, plazo 8 días hábiles, fuente oficial |
+| "¿cuánto cuesta el certificado de antecedentes?" | Gratis en línea / $1.050 en oficina |
+| "soy extranjero y necesito sacar mi cédula" | Reserva de hora, comparecencia presencial, 20 días hábiles |
+| "necesito un papel para viajar fuera de Chile" | Pasaporte (con RAG activado) |
+| "quiero renovar mi licencia de conducir" | Fallback: fuera del dominio de ARCO |
 
-{"query": "necesito sacar pasaporte"}
+### Cambiar de modelo
 
-{"query": "quiero renovar licencia de conducir"}
+Para usar Granite u otro modelo compatible:
 
-## Si algo falla
+1. Descargar el modelo `.gguf`
+2. Editar `.env`:
+```env
+LLM_MODEL_PATH=C:/Users/TU_USUARIO/models/granite-3.1-3b-a800m-instruct-q4_k_m.gguf
+```
+3. Reiniciar el servidor del modelo (Terminal 1)
 
-Si Python no funciona:
-python3 --version
+### Agregar documentos al corpus RAG
 
-Si el entorno virtual no esta activo:
-source .venv/bin/activate
+1. Copiar archivos `.pdf` o `.txt` a la carpeta `docs/`
+2. Ejecutar:
+```bash
+python ingest.py
+```
+3. Reiniciar el backend
 
-Si el modelo no responde:
-verificar que la terminal del modelo siga abierta
+El script detecta automáticamente si un archivo ya fue ingestado y lo omite si no cambió.
 
-Si la ruta del modelo esta mala:
-find ~/models -type f -iname "*.gguf" 2>/dev/null
+---
 
-## Archivos principales
+## API
 
-main.py: backend FastAPI
-knowledge.json: base de conocimiento con tramites
-requirements.txt: dependencias del proyecto
-.gitignore: archivos ignorados por Git
+### GET /
+Verifica que el backend está funcionando.
 
-## Notas
+### POST /ask
+Recibe una consulta y devuelve orientación sobre el trámite.
 
-.venv no se sube al repositorio
-los modelos .gguf no se suben al repositorio
-cada integrante puede usar una ruta distinta para su modelo
+**Request:**
+```json
+{
+  "query": "quiero sacar mi pasaporte",
+  "history": [],
+  "context": null
+}
+```
+
+**Response:**
+```json
+{
+  "tramite": "Pasaporte",
+  "respuesta": "Para obtener o renovar tu pasaporte...",
+  "respuesta_base": "El pasaporte es el documento de viaje...",
+  "costo": "$69.660 (32 paginas) / $69.740 (64 paginas)",
+  "duracion": "El plazo de entrega es de 8 dias habiles...",
+  "canal": "mixto",
+  "presencialidad": "si",
+  "requiere_clave_unica": "si",
+  "fuente": "https://www.chileatiende.gob.cl/fichas/3445-pasaporte"
+}
+```
+
+---
+
+## Mejoras pendientes
+
+### Alta prioridad (Sprint 2)
+- [ ] Lógica de detección de ambigüedad en `main.py` con campo `ambiguo` en `knowledge.json`
+- [ ] Benchmark comparativo Qwen2.5-3B vs Granite-3.1-3B (tiempo de respuesta y calidad)
+- [ ] Soporte para archivos `.docx` en el ingestor
+- [ ] Merge de `feature/dynamic-llm` a `main` con pruebas de regresión
+
+### Media prioridad (Sprint 3)
+- [ ] Scraping directo de ChileAtiende para actualización automática del corpus
+- [ ] Historial persistente de conversaciones (SQLite)
+- [ ] Panel de administración para gestionar el corpus sin tocar archivos
+- [ ] Despliegue web en Railway o Render con GPT-4o mini como LLM
+
+### Baja prioridad (post-curso)
+- [ ] Integración con ClaveÚnica para trámites personalizados
+- [ ] Soporte multiidioma (mapudungun, inglés para turistas)
+- [ ] Base de datos vectorial en producción con actualización periódica automática
+
+---
+
+## Estructura del repositorio
+
+```
+usach-tavi-ARCO-backend/
+├── main.py              # Backend FastAPI con lógica RAG y keyword search
+├── ingest.py            # Script de ingestión dinámica de documentos
+├── knowledge.json       # Corpus de 21 trámites del Registro Civil
+├── requirements.txt     # Dependencias Python
+├── .env.example         # Plantilla de variables de entorno
+├── .gitignore           # Archivos excluidos del repositorio
+├── docs/                # Carpeta para documentos adicionales (no se sube)
+├── chroma_db/           # Base de datos vectorial ChromaDB (no se sube)
+└── .github/
+    └── workflows/
+        └── ci.yml       # Pipeline CI/CD GitHub Actions
+```
+
+---
+
+## Equipo
+
+| Integrante | Rol |
+|---|---|
+| Diego Altamirano Hernández | Product Owner / Analista |
+| Roberto Orellana Tamayo | Backend Developer |
+| Pablo Purches Zapata | IA / Datos |
+| Gianello Valenzuela Robin | Frontend / QA |
+
+**Profesor:** Daniel Gacitúa Vásquez  
+**Curso:** TAVI 2026-1 — Ingeniería de Ejecución en Computación e Informática, USACH
