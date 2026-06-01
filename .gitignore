@@ -1,7 +1,26 @@
+# Entorno virtual
 .venv/
+
+# Python
 __pycache__/
 *.pyc
+*.pyo
 .pytest_cache/
+
+# Variables de entorno
 .env
+
+# Modelos
 models/
 *.gguf
+
+# RAG (fases futuras)
+chroma_db/
+docs/
+
+# Logs
+*.log
+
+# Editor
+.vscode/
+.idea/

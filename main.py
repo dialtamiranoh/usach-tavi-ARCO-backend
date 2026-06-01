@@ -8,6 +8,11 @@ import unicodedata
 import requests
 import re
 
+from dotenv import load_dotenv
+import os
+
+
+
 app = FastAPI()
 
 app.add_middleware(
@@ -24,8 +29,16 @@ KNOWLEDGE_PATH = BASE_DIR / "knowledge.json"
 with open(KNOWLEDGE_PATH, "r", encoding="utf-8") as f:
     KNOWLEDGE = json.load(f)
 
-LLM_URL = "http://127.0.0.1:8001/v1/chat/completions"
-LLM_MODEL = "arco-llm"
+# LLM_URL = "http://127.0.0.1:8001/v1/chat/completions"
+# LLM_MODEL = "arco-llm"
+
+
+load_dotenv()
+
+LLM_URL = os.getenv("LLM_URL", "http://127.0.0.1:8001/v1/chat/completions")
+LLM_MODEL = os.getenv("LLM_MODEL", "arco-llm")
+LLM_TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", "0.1"))
+LLM_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "140"))
 
 
 class ChatMessage(BaseModel):
@@ -190,8 +203,10 @@ redacta una respuesta breve de orientacion para el usuario.
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt}
         ],
-        "temperature": 0.1,
-        "max_tokens": 140
+        # "temperature": 0.1,
+        # "max_tokens": 140
+        "temperature": LLM_TEMPERATURE,
+        "max_tokens": LLM_MAX_TOKENS
     }
 
     response = requests.post(LLM_URL, json=payload, timeout=120)
