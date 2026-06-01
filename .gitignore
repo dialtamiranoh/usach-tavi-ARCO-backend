@@ -24,3 +24,6 @@ docs/
 # Editor
 .vscode/
 .idea/
+
+chroma_db/
+docs/
