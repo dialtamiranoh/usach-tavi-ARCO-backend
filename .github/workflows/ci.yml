@@ -1,0 +1,64 @@
+name: ARCO CI Pipeline
+
+on:
+  push:
+    branches: [ main, feature/* ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  validate:
+    name: Validar conocimiento y dependencias
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout codigo
+        uses: actions/checkout@v4
+
+      - name: Configurar Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Instalar dependencias
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Validar knowledge.json es JSON valido
+        run: |
+          python -c "
+          import json
+          with open('knowledge.json', 'r', encoding='utf-8') as f:
+              data = json.load(f)
+          print(f'knowledge.json valido: {len(data)} tramites encontrados')
+          "
+
+      - name: Validar campos obligatorios en knowledge.json
+        run: |
+          python -c "
+          import json
+          with open('knowledge.json', 'r', encoding='utf-8') as f:
+              data = json.load(f)
+          campos = ['id', 'titulo', 'keywords', 'respuesta', 'costo', 'duracion', 'canal', 'presencialidad', 'requiere_clave_unica', 'fuente']
+          errores = []
+          for item in data:
+              for campo in campos:
+                  if campo not in item:
+                      errores.append(f'Tramite {item[\"id\"]} falta campo: {campo}')
+          if errores:
+              for e in errores:
+                  print(e)
+              exit(1)
+          print(f'Todos los campos obligatorios presentes en {len(data)} tramites')
+          "
+
+      - name: Validar estructura de main.py
+        run: |
+          python -c "
+          import ast
+          with open('main.py', 'r', encoding='utf-8') as f:
+              source = f.read()
+          ast.parse(source)
+          print('main.py es Python valido')
+          "
