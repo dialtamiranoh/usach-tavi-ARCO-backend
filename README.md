@@ -289,3 +289,124 @@ usach-tavi-ARCO-backend/
 
 **Profesor:** Daniel Gacitúa Vásquez  
 **Curso:** TAVI 2026-1 — Ingeniería de Ejecución en Computación e Informática, USACH
+
+
+
+
+
+
+# ARCO — Guía de ejecución con benchmark
+
+## Arquitectura
+
+```
+Granite (llama-server :8001) ──┐
+                                ├── main.py (:8000) ── index.html
+Qwen    (llama-server :8002) ──┘                  └── dashboard.html
+```
+
+Cada consulta enviada desde `index.html` llama a **ambos modelos en paralelo**.  
+La respuesta mostrada corresponde al modelo seleccionado; la del otro se guarda silenciosamente para benchmark.
+
+---
+
+## Requisitos previos
+
+- Python 3.11+ con entorno virtual activado
+- `llama-server` (llama.cpp) disponible en el PATH
+- Modelos descargados en `../modelos/`
+
+---
+
+## Paso 1 — Servidor Granite (terminal 1)
+
+```bash
+llama-server \
+  --model "../modelos/granite/granite-3.3-2b-instruct-Q4_K_M.gguf" \
+  --port 8001 \
+  --ctx-size 2048 \
+  --n-predict 140 \
+  -ngl 0
+```
+
+Verificar: http://127.0.0.1:8001/health → `{"status":"ok"}`
+
+---
+
+## Paso 2 — Servidor Qwen (terminal 2)
+
+```bash
+llama-server \
+  --model "../modelos/qwen/Qwen2.5-3B-Instruct-Q4_K_M.gguf" \
+  --port 8002 \
+  --ctx-size 2048 \
+  --n-predict 140 \
+  -ngl 0
+```
+
+Verificar: http://127.0.0.1:8002/health → `{"status":"ok"}`
+
+---
+
+## Paso 3 — Backend ARCO (terminal 3)
+
+```bash
+cd usach-tavi-ARCO-backend
+.venv\Scripts\activate          # Windows
+# source .venv/bin/activate     # Linux/Mac
+
+uvicorn main:app --port 8000 --reload
+```
+
+Verificar: http://127.0.0.1:8000 → lista los dos modelos activos
+
+---
+
+## Paso 4 — Frontend
+
+Abrir con Live Server (VS Code) o directamente en el navegador:
+
+| Archivo | URL | Función |
+|---|---|---|
+| `index.html` | http://127.0.0.1:5500/index.html | Chat con selector de modelo |
+| `dashboard.html` | http://127.0.0.1:5500/dashboard.html | Dashboard de benchmark |
+
+---
+
+## Variables de entorno (`.env`)
+
+```env
+GRANITE_URL=http://127.0.0.1:8001/v1/chat/completions
+GRANITE_MODEL=granite-3.1-3b-instruct
+
+QWEN_URL=http://127.0.0.1:8002/v1/chat/completions
+QWEN_MODEL=qwen2.5-3b-instruct
+
+LLM_TEMPERATURE=0.1
+LLM_MAX_TOKENS=140
+
+USE_RAG=false
+```
+
+---
+
+## Archivos de datos
+
+| Archivo | Contenido |
+|---|---|
+| `benchmark_metrics.jsonl` | Una línea por consulta con latencia, tokens, modelo y trámite |
+| `benchmark_feedback.jsonl` | Feedback (👍/🤔/👎) por `trace_id` |
+
+---
+
+## Endpoints disponibles
+
+| Método | Ruta | Descripción |
+|---|---|---|
+| `POST` | `/ask` | Consulta al modelo (`model: "granite"` o `"qwen"`) |
+| `GET` | `/models` | Lista modelos configurados |
+| `POST` | `/feedback` | Registra feedback de una respuesta |
+| `GET` | `/metrics` | Todas las métricas con feedback |
+| `GET` | `/stats` | Resumen global |
+| `GET` | `/stats/compare` | Comparación por modelo (dashboard) |
+| `GET` | `/metrics/timeline` | Latencia en el tiempo por modelo |
