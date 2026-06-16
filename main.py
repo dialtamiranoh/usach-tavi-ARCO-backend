@@ -3,8 +3,8 @@ main.py — Backend unificado ARCO
 Puerto: 8000  →  uvicorn main:app --port 8000 --reload
 
 Modelos LLM disponibles:
-  granite → http://127.0.0.1:8001  (Granite-3.1-3B)
-  qwen    → http://127.0.0.1:8002  (Qwen2.5-3B)
+  granite → http://127.0.0.1:8001  (Granite-3.1-2B)
+  qwen    → http://127.0.0.1:8002  (Qwen2.5-1.5B)
 
 Archivos de persistencia:
   benchmark_metrics.jsonl  — una línea por consulta (campo model_key)
@@ -71,13 +71,13 @@ with open(KNOWLEDGE_PATH, "r", encoding="utf-8") as f:
 MODELS = {
     "granite": {
         "url":   os.getenv("GRANITE_URL",   "http://127.0.0.1:8001/v1/chat/completions"),
-        "model": os.getenv("GRANITE_MODEL", "granite-3.1-3b-instruct"),
-        "label": "Granite-3.1-3B",
+        "model": os.getenv("GRANITE_MODEL", "granite-3.1-2b-instruct"),
+        "label": "Granite-3.1-2B",
     },
     "qwen": {
         "url":   os.getenv("QWEN_URL",   "http://127.0.0.1:8002/v1/chat/completions"),
-        "model": os.getenv("QWEN_MODEL", "qwen2.5-3b-instruct"),
-        "label": "Qwen2.5-3B",
+        "model": os.getenv("QWEN_MODEL", "qwen2.5-1.5b-instruct"),
+        "label": "Qwen2.5-1.5B",
     },
 }
 
@@ -329,7 +329,8 @@ redacta una respuesta breve de orientacion para el usuario.
 
     except Exception as e:
         respuesta     = clean_model_text(item["respuesta"])
-        output_tokens = estimate_tokens(respuesta)
+        input_tokens  = 0
+        output_tokens = 0
         fallback      = True
         error         = str(e)
 
