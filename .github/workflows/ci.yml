@@ -62,3 +62,9 @@ jobs:
           ast.parse(source)
           print('main.py es Python valido')
           "
+          
+      - name: Ejecutar tests automaticos
+        run: |
+          pip install pytest httpx
+          pytest tests/ -v --tb=short
+          
