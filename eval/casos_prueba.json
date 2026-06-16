@@ -1,0 +1,62 @@
+[
+  {
+    "id": "TC-01",
+    "query": "quiero sacar pasaporte",
+    "tramite_esperado": "Pasaporte",
+    "keywords_respuesta": ["presencial", "reservar", "8 dias"]
+  },
+  {
+    "id": "TC-02",
+    "query": "cuanto cuesta el certificado de antecedentes",
+    "tramite_esperado": "Certificado de antecedentes",
+    "keywords_respuesta": ["gratis", "linea", "oficina"]
+  },
+  {
+    "id": "TC-03",
+    "query": "renovar carnet de identidad",
+    "tramite_esperado": "Cedula de identidad para chilenos",
+    "keywords_respuesta": ["reservar", "presencial"]
+  },
+  {
+    "id": "TC-04",
+    "query": "soy migrante y quiero obtener mi identificacion",
+    "tramite_esperado": "Cedula de identidad para extranjeros",
+    "keywords_respuesta": ["presencial", "reservar"]
+  },
+  {
+    "id": "TC-05",
+    "query": "sacar clave unica",
+    "tramite_esperado": "ClaveUnica",
+    "keywords_respuesta": ["gratis", "videoconferencia"]
+  },
+  {
+    "id": "TC-06",
+    "query": "transferir un vehiculo",
+    "tramite_esperado": "Transferencia de dominio de vehiculos motorizados ante un oficial civil",
+    "keywords_respuesta": ["presencial", "reserva"]
+  },
+  {
+    "id": "TC-07",
+    "query": "inscribir a mi bebe recien nacido en el registro civil",
+    "tramite_esperado": "Inscripcion de nacimiento",
+    "keywords_respuesta": ["presencial", "60 dias"]
+  },
+  {
+    "id": "TC-08",
+    "query": "sacar certificado de nacimiento",
+    "tramite_esperado": "Certificado de nacimiento",
+    "keywords_respuesta": ["gratis", "linea"]
+  },
+  {
+    "id": "TC-09",
+    "query": "casarse en el registro civil",
+    "tramite_esperado": "Reservar hora para matrimonio civil o inscripcion del matrimonio religioso",
+    "keywords_respuesta": ["reservar", "presencial"]
+  },
+  {
+    "id": "TC-10",
+    "query": "quiero renovar licencia de conducir",
+    "tramite_esperado": "Fuera del alcance de ARCO",
+    "keywords_respuesta": ["registro civil"]
+  }
+]
