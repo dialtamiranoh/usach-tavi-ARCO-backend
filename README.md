@@ -46,7 +46,7 @@ Pipeline de integración continua que se ejecuta automáticamente en cada push. 
 | Backend | Python 3.11 + FastAPI + Uvicorn |
 | Frontend | HTML5 + CSS3 + JavaScript vanilla |
 | LLM local | llama-cpp-python server (puerto 8001) |
-| Modelo por defecto | Qwen2.5-3B-Instruct Q4_K_M GGUF |
+| Modelo por defecto | Qwen2.5-1.5B-Instruct Q4_K_M GGUF |
 | RAG | ChromaDB + sentence-transformers |
 | Embeddings | paraphrase-multilingual-MiniLM-L12-v2 |
 | Recuperación (fallback) | Keywords normalizados sobre knowledge.json |
@@ -114,7 +114,7 @@ Editar `.env` con la ruta real al modelo:
 ```env
 LLM_URL=http://127.0.0.1:8001/v1/chat/completions
 LLM_MODEL=arco-llm
-LLM_MODEL_PATH=C:/Users/TU_USUARIO/models/qwen2.5-3b-instruct-q4_k_m.gguf
+LLM_MODEL_PATH=C:/Users/TU_USUARIO/models/qwen2.5-1.5b-instruct-q4_k_m.gguf
 LLM_TEMPERATURE=0.1
 LLM_MAX_TOKENS=140
 LLM_N_CTX=2048
@@ -124,7 +124,7 @@ USE_RAG=false
 ### 5. Descargar el modelo
 
 ```bash
-hf download Qwen/Qwen2.5-3B-Instruct-GGUF qwen2.5-3b-instruct-q4_k_m.gguf --local-dir "C:/Users/TU_USUARIO/models"
+hf download Qwen/Qwen2.5-1.5B-Instruct-GGUF qwen2.5-1.5b-instruct-q4_k_m.gguf --local-dir "C:/Users/TU_USUARIO/models"
 ```
 
 ### 6. Ingestar el corpus (solo si USE_RAG=true)
@@ -187,7 +187,7 @@ Para usar Granite u otro modelo compatible:
 1. Descargar el modelo `.gguf`
 2. Editar `.env`:
 ```env
-LLM_MODEL_PATH=C:/Users/TU_USUARIO/models/granite-3.1-3b-a800m-instruct-q4_k_m.gguf
+LLM_MODEL_PATH=C:/Users/TU_USUARIO/models/granite-3.1-2b-a800m-instruct-q4_k_m.gguf
 ```
 3. Reiniciar el servidor del modelo (Terminal 1)
 
@@ -242,7 +242,7 @@ Recibe una consulta y devuelve orientación sobre el trámite.
 
 ### Alta prioridad (Sprint 2)
 - [ ] Lógica de detección de ambigüedad en `main.py` con campo `ambiguo` en `knowledge.json`
-- [ ] Benchmark comparativo Qwen2.5-3B vs Granite-3.1-3B (tiempo de respuesta y calidad)
+- [ ] Benchmark comparativo Qwen2.5-1.5B vs Granite-3.1-2B (tiempo de respuesta y calidad)
 - [ ] Soporte para archivos `.docx` en el ingestor
 - [ ] Merge de `feature/dynamic-llm` a `main` con pruebas de regresión
 
@@ -340,7 +340,7 @@ Verificar: http://127.0.0.1:8001/health → `{"status":"ok"}`
 
 ```bash
 llama-server \
-  --model "../modelos/qwen/Qwen2.5-3B-Instruct-Q4_K_M.gguf" \
+  --model "../modelos/qwen/Qwen2.5-1.5B-Instruct-Q4_K_M.gguf" \
   --port 8002 \
   --ctx-size 2048 \
   --n-predict 140 \
@@ -380,10 +380,10 @@ Abrir con Live Server (VS Code) o directamente en el navegador:
 
 ```env
 GRANITE_URL=http://127.0.0.1:8001/v1/chat/completions
-GRANITE_MODEL=granite-3.1-3b-instruct
+GRANITE_MODEL=granite-3.1-2b-instruct
 
 QWEN_URL=http://127.0.0.1:8002/v1/chat/completions
-QWEN_MODEL=qwen2.5-3b-instruct
+QWEN_MODEL=qwen2.5-1.5b-instruct
 
 LLM_TEMPERATURE=0.1
 LLM_MAX_TOKENS=140
