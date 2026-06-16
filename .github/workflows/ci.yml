@@ -67,4 +67,9 @@ jobs:
         run: |
           pip install pytest httpx
           pytest tests/ -v --tb=short
+      
+      - name: Verificar regresion vs baseline
+        run: |
+          python eval/evaluador.py || true
+          python eval/verificar_baseline.py
           
