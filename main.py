@@ -25,6 +25,23 @@ import time
 import uuid
 from datetime import datetime
 import os
+import logging
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s %(levelname)s %(message)s',
+    handlers=[
+        logging.FileHandler("arco.log", encoding="utf-8"),
+        logging.StreamHandler()
+    ]
+)
+
+logger = logging.getLogger("arco")
+
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("sentence_transformers").setLevel(logging.WARNING)
+logging.getLogger("chromadb").setLevel(logging.WARNING)
+logging.getLogger("huggingface_hub").setLevel(logging.WARNING)
 
 load_dotenv()
 
@@ -366,6 +383,7 @@ def ask_question(question: Question):
         if rag_results:
             mejor = rag_results[0]
             matched_item = {
+                
                 "titulo":               mejor["titulo"] or "Resultado RAG",
                 "respuesta":            mejor["texto"],
                 "costo":                mejor.get("costo"),
@@ -375,6 +393,7 @@ def ask_question(question: Question):
                 "requiere_clave_unica": mejor.get("requiere_clave_unica", "ver fuente oficial"),
                 "fuente":               mejor["fuente"] or "",
             }
+            
 
     # Búsqueda por keywords en knowledge.json
     if not matched_item:
@@ -415,6 +434,14 @@ def ask_question(question: Question):
         if ctx_item:
             matched_item           = ctx_item
             using_previous_context = True
+
+    logger.info(
+        f"query='{question.query}' "
+        f"modelo={model_key} "
+        f"tramite='{matched_item['titulo'] if matched_item else 'No identificado'}' "
+        f"rag={USE_RAG} "
+        f"followup={using_previous_context}"
+    )
 
     # Trámite no identificado
     if not matched_item:
