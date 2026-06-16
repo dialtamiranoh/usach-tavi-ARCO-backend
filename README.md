@@ -1,6 +1,6 @@
 # ARCO — Asistente para el Registro Civil y su Orientación
 
-**Rama:** `feature/dynamic-llm`  
+**Rama activa:** `feature/mlops-pipeline`  
 **Sprint:** 2  
 **Última actualización:** Junio 2026
 
@@ -14,28 +14,31 @@ ARCO es un asistente conversacional que responde preguntas en lenguaje natural s
 
 ---
 
-## Novedades de esta versión (Sprint 2)
+## Novedades Sprint 2
 
-### 1. Configuración dinámica del LLM via variables de entorno
-El modelo de lenguaje ya no está hardcodeado en el código. Se configura mediante un archivo `.env`, lo que permite cambiar entre modelos (Qwen, Granite, u otros) sin tocar `main.py`.
+### 1. Soporte dual de modelos LLM (Granite y Qwen)
+El backend soporta dos modelos simultáneamente configurables via `.env`. Cada consulta registra el modelo utilizado en el benchmark. El frontend permite seleccionar el modelo activo y ejecuta silenciosamente el otro para comparación.
 
-### 2. RAG con ChromaDB e ingestión dinámica
-Se incorporó un pipeline de Retrieval-Augmented Generation (RAG) usando ChromaDB como base de datos vectorial y `paraphrase-multilingual-MiniLM-L12-v2` como modelo de embeddings. Esto permite búsqueda semántica sobre el corpus oficial.
+### 2. Benchmark automático con dashboard
+Cada consulta se registra en `benchmark_metrics.jsonl` con latencia, tokens, modelo y trámite. El feedback del usuario (👍/🤔/👎) se guarda en `benchmark_feedback.jsonl`. El dashboard `dashboard.html` muestra comparación en tiempo real entre Granite y Qwen.
 
-### 3. Script de ingestión `ingest.py`
-Permite agregar nuevos documentos (PDF, TXT) al corpus sin tocar el código. Incluye control de archivos ya procesados mediante hash MD5 para evitar reingestiones innecesarias.
+### 3. RAG con ChromaDB e ingestión dinámica
+Pipeline de Retrieval-Augmented Generation usando ChromaDB y embeddings `paraphrase-multilingual-MiniLM-L12-v2`. El script `ingest.py` procesa `knowledge.json` y documentos adicionales (PDF, TXT) desde la carpeta `docs/` con deduplicación por hash MD5.
 
-### 4. Keywords enriquecidas en `knowledge.json`
-Todos los trámites fueron enriquecidos con keywords semánticas adicionales para mejorar la precisión de la búsqueda RAG. Por ejemplo, "pasaporte" ahora incluye "viajar fuera de chile", "salir del pais", "documento para viajar".
+### 4. Versionado de prompts
+El system prompt se gestiona en `prompts.json` con soporte multi-versión. La versión activa se controla via `PROMPT_VERSION` en `.env` sin tocar el código. Versiones disponibles: v1.0.0 (base) y v1.1.0 (con clarificación de nacionalidad).
 
-### 5. Prompt con clarificación de ambigüedades
-El sistema prompt fue actualizado para que ARCO haga preguntas de clarificación cuando la consulta es ambigua (por ejemplo, cuando no queda claro si el usuario es chileno o extranjero).
+### 5. Pipeline MLOps con tests automáticos
+16 tests pytest organizados en tres módulos — conocimiento, prompts y smoke tests — que validan el sistema sin necesitar el LLM corriendo. El pipeline CI/CD corre automáticamente en cada push.
 
-### 6. CI/CD con GitHub Actions
-Pipeline de integración continua que se ejecuta automáticamente en cada push. Valida:
-- Sintaxis de `main.py`
-- Estructura y campos obligatorios de `knowledge.json`
-- Instalación de dependencias
+### 6. Evaluación automática con ground truth
+10 casos de prueba con trámite esperado y keywords de respuesta. El evaluador genera reportes con timestamp y mantiene un historial. Accuracy actual: 80% (baseline documentado).
+
+### 7. Detección de regresión
+Comparación automática contra un baseline aprobado. Si un caso que antes funcionaba deja de funcionar, el pipeline falla y bloquea el merge.
+
+### 8. Observabilidad con logging estructurado
+Logging en `arco.log` con formato `timestamp INFO query=... modelo=... tramite=... rag=... followup=...`. Librerías externas (HuggingFace, ChromaDB, httpx) filtradas para mantener el log limpio.
 
 ---
 
@@ -45,13 +48,15 @@ Pipeline de integración continua que se ejecuta automáticamente en cada push. 
 |---|---|
 | Backend | Python 3.11 + FastAPI + Uvicorn |
 | Frontend | HTML5 + CSS3 + JavaScript vanilla |
-| LLM local | llama-cpp-python server (puerto 8001) |
-| Modelo por defecto | Qwen2.5-3B-Instruct Q4_K_M GGUF |
+| LLM — Granite | llama-cpp-python server :8001 |
+| LLM — Qwen | llama-cpp-python server :8002 |
+| Modelos | Granite-3.1-3B Q4_K_M / Qwen2.5-3B Q4_K_M GGUF |
 | RAG | ChromaDB + sentence-transformers |
 | Embeddings | paraphrase-multilingual-MiniLM-L12-v2 |
-| Recuperación (fallback) | Keywords normalizados sobre knowledge.json |
+| Recuperación fallback | Keywords normalizados sobre knowledge.json |
 | CI/CD | GitHub Actions |
-| Control de versiones | GitHub (2 repositorios: frontend + backend) |
+| Testing | pytest + httpx + FastAPI TestClient |
+| Observabilidad | logging estructurado en arco.log |
 
 ---
 
@@ -67,7 +72,7 @@ Pipeline de integración continua que se ejecuta automáticamente en cada push. 
 - Git
 - 16 GB RAM recomendados
 - 10 GB de espacio libre en disco
-- Modelo `.gguf` descargado localmente
+- Modelos `.gguf` descargados localmente
 - Windows 10+ / Linux / macOS
 
 ---
@@ -84,17 +89,16 @@ git clone https://github.com/dialtamiranoh/usach-tavi-ARCO-frontend.git
 ### 2. Crear y activar el entorno virtual
 
 ```bash
-# Crear venv en la carpeta padre
-python -m venv .venv
-
 # Windows
+python -m venv .venv
 .venv\Scripts\Activate.ps1
 
 # Linux / macOS
+python -m venv .venv
 source .venv/bin/activate
 ```
 
-### 3. Instalar dependencias del backend
+### 3. Instalar dependencias
 
 ```bash
 cd usach-tavi-ARCO-backend
@@ -105,29 +109,23 @@ pip install "llama-cpp-python[server]"
 ### 4. Configurar variables de entorno
 
 ```bash
-# Copiar el archivo de ejemplo
 cp .env.example .env
 ```
 
-Editar `.env` con la ruta real al modelo:
+Editar `.env` con las rutas reales a los modelos:
 
 ```env
-LLM_URL=http://127.0.0.1:8001/v1/chat/completions
-LLM_MODEL=arco-llm
-LLM_MODEL_PATH=C:/Users/TU_USUARIO/models/qwen2.5-3b-instruct-q4_k_m.gguf
+GRANITE_URL=http://127.0.0.1:8001/v1/chat/completions
+GRANITE_MODEL=granite-3.1-3b-instruct
+QWEN_URL=http://127.0.0.1:8002/v1/chat/completions
+QWEN_MODEL=qwen2.5-3b-instruct
 LLM_TEMPERATURE=0.1
 LLM_MAX_TOKENS=140
-LLM_N_CTX=2048
 USE_RAG=false
+PROMPT_VERSION=1.1.0
 ```
 
-### 5. Descargar el modelo
-
-```bash
-hf download Qwen/Qwen2.5-3B-Instruct-GGUF qwen2.5-3b-instruct-q4_k_m.gguf --local-dir "C:/Users/TU_USUARIO/models"
-```
-
-### 6. Ingestar el corpus (solo si USE_RAG=true)
+### 5. Ingestar el corpus (solo si USE_RAG=true)
 
 ```bash
 python ingest.py
@@ -137,34 +135,49 @@ python ingest.py
 
 ## Ejecución
 
-Abrir tres terminales con el venv activo:
+Abrir cuatro terminales con el venv activo:
 
-### Terminal 1 — Modelo LLM
+### Terminal 1 — Modelo Granite
 
 ```bash
 python -m llama_cpp.server \
-  --model "RUTA/AL/MODELO.gguf" \
-  --host 127.0.0.1 \
-  --port 8001 \
-  --model_alias arco-llm \
-  --n_ctx 2048
+  --model "RUTA/granite-3.1-3b-a800m-instruct-q4_k_m.gguf" \
+  --host 127.0.0.1 --port 8001 \
+  --model_alias granite-3.1-3b-instruct --n_ctx 2048
 ```
 
-### Terminal 2 — Backend
+Verificar: `http://127.0.0.1:8001/health`
+
+### Terminal 2 — Modelo Qwen
+
+```bash
+python -m llama_cpp.server \
+  --model "RUTA/qwen2.5-3b-instruct-q4_k_m.gguf" \
+  --host 127.0.0.1 --port 8002 \
+  --model_alias qwen2.5-3b-instruct --n_ctx 2048
+```
+
+Verificar: `http://127.0.0.1:8002/health`
+
+### Terminal 3 — Backend
 
 ```bash
 cd usach-tavi-ARCO-backend
-uvicorn main:app --reload
+uvicorn main:app --port 8000 --reload
 ```
 
-### Terminal 3 — Frontend
+Verificar: `http://127.0.0.1:8000`
+
+### Terminal 4 — Frontend
 
 ```bash
 cd usach-tavi-ARCO-frontend
 python -m http.server 5500
 ```
 
-Abrir en el navegador: `http://127.0.0.1:5500`
+Abrir en el navegador:
+- Chat: `http://127.0.0.1:5500/index.html`
+- Dashboard benchmark: `http://127.0.0.1:5500/dashboard.html`
 
 ---
 
@@ -176,86 +189,128 @@ Abrir en el navegador: `http://127.0.0.1:5500`
 |---|---|
 | "quiero sacar mi pasaporte" | Canal mixto, costo, plazo 8 días hábiles, fuente oficial |
 | "¿cuánto cuesta el certificado de antecedentes?" | Gratis en línea / $1.050 en oficina |
-| "soy extranjero y necesito sacar mi cédula" | Reserva de hora, comparecencia presencial, 20 días hábiles |
+| "soy extranjero y necesito sacar mi cédula" | Reserva de hora, presencial, 20 días hábiles |
 | "necesito un papel para viajar fuera de Chile" | Pasaporte (con RAG activado) |
 | "quiero renovar mi licencia de conducir" | Fallback: fuera del dominio de ARCO |
 
-### Cambiar de modelo
+### Cambiar modelo activo
 
-Para usar Granite u otro modelo compatible:
+En `index.html` seleccionar Granite o Qwen desde el selector. El modelo no seleccionado corre en segundo plano para el benchmark.
 
-1. Descargar el modelo `.gguf`
-2. Editar `.env`:
+### Cambiar versión del prompt
+
+Editar `.env`:
 ```env
-LLM_MODEL_PATH=C:/Users/TU_USUARIO/models/granite-3.1-3b-a800m-instruct-q4_k_m.gguf
+PROMPT_VERSION=1.0.0   # Prompt base
+PROMPT_VERSION=1.1.0   # Con clarificación de nacionalidad
 ```
-3. Reiniciar el servidor del modelo (Terminal 1)
+
+Reiniciar el backend para aplicar el cambio.
 
 ### Agregar documentos al corpus RAG
 
-1. Copiar archivos `.pdf` o `.txt` a la carpeta `docs/`
-2. Ejecutar:
 ```bash
-python ingest.py
-```
-3. Reiniciar el backend
+# Copiar documentos a docs/
+cp manual_registro_civil.pdf docs/
 
-El script detecta automáticamente si un archivo ya fue ingestado y lo omite si no cambió.
+# Reingestar
+python ingest.py
+
+# Reiniciar el backend
+uvicorn main:app --port 8000 --reload
+```
 
 ---
 
 ## API
 
-### GET /
-Verifica que el backend está funcionando.
+| Método | Ruta | Descripción |
+|---|---|---|
+| GET | `/` | Estado del backend y modelos activos |
+| GET | `/models` | Lista modelos configurados |
+| POST | `/ask` | Consulta al modelo seleccionado |
+| POST | `/feedback` | Registra feedback de una respuesta |
+| GET | `/metrics` | Todas las métricas con feedback |
+| GET | `/stats` | Resumen global |
+| GET | `/stats/compare` | Comparación Granite vs Qwen |
+| GET | `/metrics/timeline` | Latencia en el tiempo por modelo |
 
-### POST /ask
-Recibe una consulta y devuelve orientación sobre el trámite.
+### Ejemplo POST /ask
 
-**Request:**
 ```json
 {
   "query": "quiero sacar mi pasaporte",
+  "model": "granite",
   "history": [],
   "context": null
 }
 ```
 
-**Response:**
 ```json
 {
   "tramite": "Pasaporte",
   "respuesta": "Para obtener o renovar tu pasaporte...",
-  "respuesta_base": "El pasaporte es el documento de viaje...",
   "costo": "$69.660 (32 paginas) / $69.740 (64 paginas)",
-  "duracion": "El plazo de entrega es de 8 dias habiles...",
+  "duracion": "8 dias habiles desde la solicitud",
   "canal": "mixto",
   "presencialidad": "si",
   "requiere_clave_unica": "si",
-  "fuente": "https://www.chileatiende.gob.cl/fichas/3445-pasaporte"
+  "fuente": "https://www.chileatiende.gob.cl/fichas/3445-pasaporte",
+  "trace_id": "uuid",
+  "model_used": "Granite-3.1-3B",
+  "latency_ms": 1200,
+  "total_tokens": 320,
+  "fallback": false
 }
 ```
 
 ---
 
-## Mejoras pendientes
+## Tests y evaluación
 
-### Alta prioridad (Sprint 2)
-- [ ] Lógica de detección de ambigüedad en `main.py` con campo `ambiguo` en `knowledge.json`
-- [ ] Benchmark comparativo Qwen2.5-3B vs Granite-3.1-3B (tiempo de respuesta y calidad)
-- [ ] Soporte para archivos `.docx` en el ingestor
-- [ ] Merge de `feature/dynamic-llm` a `main` con pruebas de regresión
+### Correr tests automáticos
 
-### Media prioridad (Sprint 3)
-- [ ] Scraping directo de ChileAtiende para actualización automática del corpus
-- [ ] Historial persistente de conversaciones (SQLite)
-- [ ] Panel de administración para gestionar el corpus sin tocar archivos
-- [ ] Despliegue web en Railway o Render con GPT-4o mini como LLM
+```bash
+pytest tests/ -v
+```
 
-### Baja prioridad (post-curso)
-- [ ] Integración con ClaveÚnica para trámites personalizados
-- [ ] Soporte multiidioma (mapudungun, inglés para turistas)
-- [ ] Base de datos vectorial en producción con actualización periódica automática
+16 tests en 3 módulos:
+- `tests/test_knowledge.py` — 6 tests (estructura del corpus)
+- `tests/test_prompts.py` — 3 tests (instrucciones del system prompt)
+- `tests/test_smoke.py` — 7 tests (endpoints sin LLM)
+
+### Correr evaluador con ground truth
+
+```bash
+python eval/evaluador.py
+```
+
+Genera `eval/reporte_YYYYMMDD_HHMMSS.json` y actualiza `eval/reporte_latest.json`.
+
+### Verificar regresiones vs baseline
+
+```bash
+python eval/verificar_baseline.py
+```
+
+Falla con exit code 1 si algún caso que antes pasaba ahora falla.
+
+### Estado actual del evaluador
+
+| Caso | Query | Estado |
+|---|---|---|
+| TC-01 | quiero sacar pasaporte | ✅ PASS |
+| TC-02 | cuanto cuesta el certificado de antecedentes | ✅ PASS |
+| TC-03 | renovar carnet de identidad | ✅ PASS |
+| TC-04 | cedula para extranjeros | ❌ FAIL (limitación keyword search) |
+| TC-05 | sacar clave unica | ✅ PASS |
+| TC-06 | transferir un vehiculo | ✅ PASS |
+| TC-07 | inscribir nacimiento recien nacido | ❌ FAIL (limitación keyword search) |
+| TC-08 | sacar certificado de nacimiento | ✅ PASS |
+| TC-09 | casarse en el registro civil | ✅ PASS |
+| TC-10 | quiero renovar licencia de conducir | ✅ PASS |
+
+TC-04 y TC-07 fallan porque el keyword search por substring no resuelve ambigüedad semántica. Se resuelven activando RAG (`USE_RAG=true`).
 
 ---
 
@@ -263,18 +318,81 @@ Recibe una consulta y devuelve orientación sobre el trámite.
 
 ```
 usach-tavi-ARCO-backend/
-├── main.py              # Backend FastAPI con lógica RAG y keyword search
-├── ingest.py            # Script de ingestión dinámica de documentos
-├── knowledge.json       # Corpus de 21 trámites del Registro Civil
-├── requirements.txt     # Dependencias Python
-├── .env.example         # Plantilla de variables de entorno
-├── .gitignore           # Archivos excluidos del repositorio
-├── docs/                # Carpeta para documentos adicionales (no se sube)
-├── chroma_db/           # Base de datos vectorial ChromaDB (no se sube)
+├── main.py                  # Backend FastAPI — dual modelo, RAG, benchmark, métricas
+├── ingest.py                # Ingestión dinámica PDF/TXT con hash MD5
+├── knowledge.json           # Corpus 21 trámites Registro Civil
+├── prompts.json             # Versionado de prompts (v1.0.0 y v1.1.0)
+├── requirements.txt
+├── .env.example             # Plantilla de variables de entorno
+├── .gitignore
+├── Arquitectura.png
+├── README.md
+├── tests/
+│   ├── conftest.py          # Fuerza USE_RAG=false para todos los tests
+│   ├── test_knowledge.py    # 6 tests validación corpus
+│   ├── test_prompts.py      # 3 tests validación prompt
+│   └── test_smoke.py        # 7 tests endpoint sin LLM
+├── eval/
+│   ├── casos_prueba.json    # 10 casos ground truth
+│   ├── evaluador.py         # Evaluador automático con historial timestamp
+│   ├── verificar_baseline.py # Detección de regresión vs baseline
+│   ├── baseline.json        # Snapshot aprobado (no se modifica manualmente)
+│   └── reporte_latest.json  # Último reporte generado
+├── docs/                    # Documentos adicionales para RAG (no sube a git)
+├── chroma_db/               # Base de datos vectorial ChromaDB (no sube a git)
 └── .github/
     └── workflows/
-        └── ci.yml       # Pipeline CI/CD GitHub Actions
+        └── ci.yml           # Pipeline CI/CD GitHub Actions
 ```
+
+---
+
+## CI/CD Pipeline
+
+El pipeline corre automáticamente en cada push a `main` y `feature/*`:
+
+```
+git push
+    ↓
+GitHub Actions
+    ↓
+  1. Instalar Python 3.11 + dependencias
+  2. Validar knowledge.json (JSON válido + campos obligatorios)
+  3. Validar sintaxis main.py
+  4. pytest tests/ -v --tb=short (16 tests)
+  5. python eval/evaluador.py (accuracy >= 90% requerida)
+  6. python eval/verificar_baseline.py (sin regresiones)
+```
+
+---
+
+## Archivos de datos (no suben a git)
+
+| Archivo | Contenido |
+|---|---|
+| `benchmark_metrics.jsonl` | Una línea por consulta con latencia, tokens, modelo y trámite |
+| `benchmark_feedback.jsonl` | Feedback (👍/🤔/👎) por `trace_id` |
+| `arco.log` | Log estructurado de consultas |
+| `chroma_db/` | Base vectorial ChromaDB |
+| `docs/` | Documentos adicionales para RAG |
+
+---
+
+## Mejoras pendientes
+
+### Alta prioridad
+- [ ] Resolver TC-04 y TC-07 con RAG semántico activado
+- [ ] Merge de `feature/mlops-pipeline` a `main`
+- [ ] Benchmark formal Granite vs Qwen con 20+ consultas documentadas
+
+### Media prioridad
+- [ ] Integración WhatsApp via Twilio + n8n
+- [ ] Despliegue en Railway con GPT-4o mini como LLM
+- [ ] Soporte `.docx` en el ingestor
+
+### Baja prioridad
+- [ ] Historial persistente de conversaciones (SQLite)
+- [ ] Scraping automático de ChileAtiende para actualización del corpus
 
 ---
 
@@ -289,127 +407,3 @@ usach-tavi-ARCO-backend/
 
 **Profesor:** Daniel Gacitúa Vásquez  
 **Curso:** TAVI 2026-1 — Ingeniería de Ejecución en Computación e Informática, USACH
-
-
-
----
-```
-```
----
-
-
-# ARCO — Guía de ejecución con benchmark
-
-## Arquitectura
-
-```
-Granite (llama-server :8001) ──┐
-                                ├── main.py (:8000) ── index.html
-Qwen    (llama-server :8002) ──┘                  └── dashboard.html
-```
-
-Cada consulta enviada desde `index.html` llama a **ambos modelos en paralelo**.  
-La respuesta mostrada corresponde al modelo seleccionado; la del otro se guarda silenciosamente para benchmark.
-
----
-
-## Requisitos previos
-
-- Python 3.11+ con entorno virtual activado
-- `llama-server` (llama.cpp) disponible en el PATH
-- Modelos descargados en `../modelos/`
-
----
-
-## Paso 1 — Servidor Granite (terminal 1)
-
-```bash
-llama-server \
-  --model "../modelos/granite/granite-3.3-2b-instruct-Q4_K_M.gguf" \
-  --port 8001 \
-  --ctx-size 2048 \
-  --n-predict 140 \
-  -ngl 0
-```
-
-Verificar: http://127.0.0.1:8001/health → `{"status":"ok"}`
-
----
-
-## Paso 2 — Servidor Qwen (terminal 2)
-
-```bash
-llama-server \
-  --model "../modelos/qwen/Qwen2.5-3B-Instruct-Q4_K_M.gguf" \
-  --port 8002 \
-  --ctx-size 2048 \
-  --n-predict 140 \
-  -ngl 0
-```
-
-Verificar: http://127.0.0.1:8002/health → `{"status":"ok"}`
-
----
-
-## Paso 3 — Backend ARCO (terminal 3)
-
-```bash
-cd usach-tavi-ARCO-backend
-.venv\Scripts\activate          # Windows
-# source .venv/bin/activate     # Linux/Mac
-
-uvicorn main:app --port 8000 --reload
-```
-
-Verificar: http://127.0.0.1:8000 → lista los dos modelos activos
-
----
-
-## Paso 4 — Frontend
-
-Abrir con Live Server (VS Code) o directamente en el navegador:
-
-| Archivo | URL | Función |
-|---|---|---|
-| `index.html` | http://127.0.0.1:5500/index.html | Chat con selector de modelo |
-| `dashboard.html` | http://127.0.0.1:5500/dashboard.html | Dashboard de benchmark |
-
----
-
-## Variables de entorno (`.env`)
-
-```env
-GRANITE_URL=http://127.0.0.1:8001/v1/chat/completions
-GRANITE_MODEL=granite-3.1-3b-instruct
-
-QWEN_URL=http://127.0.0.1:8002/v1/chat/completions
-QWEN_MODEL=qwen2.5-3b-instruct
-
-LLM_TEMPERATURE=0.1
-LLM_MAX_TOKENS=140
-
-USE_RAG=false
-```
-
----
-
-## Archivos de datos
-
-| Archivo | Contenido |
-|---|---|
-| `benchmark_metrics.jsonl` | Una línea por consulta con latencia, tokens, modelo y trámite |
-| `benchmark_feedback.jsonl` | Feedback (👍/🤔/👎) por `trace_id` |
-
----
-
-## Endpoints disponibles
-
-| Método | Ruta | Descripción |
-|---|---|---|
-| `POST` | `/ask` | Consulta al modelo (`model: "granite"` o `"qwen"`) |
-| `GET` | `/models` | Lista modelos configurados |
-| `POST` | `/feedback` | Registra feedback de una respuesta |
-| `GET` | `/metrics` | Todas las métricas con feedback |
-| `GET` | `/stats` | Resumen global |
-| `GET` | `/stats/compare` | Comparación por modelo (dashboard) |
-| `GET` | `/metrics/timeline` | Latencia en el tiempo por modelo |

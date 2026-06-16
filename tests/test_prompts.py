@@ -1,5 +1,8 @@
+import json
 import pytest
-from main import call_llm
+from pathlib import Path
+
+PROMPTS_PATH = Path(__file__).resolve().parent.parent / "prompts.json"
 
 INSTRUCCIONES_MINIMAS = [
     "no inventes",
@@ -9,27 +12,25 @@ INSTRUCCIONES_MINIMAS = [
     "espanol",
 ]
 
-def get_system_prompt():
-    """Extrae el system_prompt desde la función call_llm en main.py"""
-    import inspect
-    source = inspect.getsource(call_llm)
-    start = source.find('system_prompt = (') 
-    end = source.find('history_text =')
-    return source[start:end]
+@pytest.fixture
+def prompts():
+    with open(PROMPTS_PATH, "r", encoding="utf-8") as f:
+        return json.load(f)
 
-def test_system_prompt_contiene_instrucciones_minimas():
-    prompt = get_system_prompt().lower()
-    faltantes = []
-    for instruccion in INSTRUCCIONES_MINIMAS:
-        if instruccion not in prompt:
-            faltantes.append(instruccion)
+def get_system_prompt(prompts):
+    version_activa = prompts["version_activa"]
+    return prompts["versiones"][version_activa]["system_prompt"]
+
+def test_system_prompt_contiene_instrucciones_minimas(prompts):
+    prompt = get_system_prompt(prompts).lower()
+    faltantes = [i for i in INSTRUCCIONES_MINIMAS if i not in prompt]
     assert not faltantes, f"El system_prompt falta instrucciones: {faltantes}"
 
-def test_system_prompt_no_esta_vacio():
-    prompt = get_system_prompt()
+def test_system_prompt_no_esta_vacio(prompts):
+    prompt = get_system_prompt(prompts)
     assert len(prompt) > 100, "El system_prompt es demasiado corto"
 
-def test_system_prompt_limita_respuesta():
-    prompt = get_system_prompt().lower()
+def test_system_prompt_limita_respuesta(prompts):
+    prompt = get_system_prompt(prompts).lower()
     assert any(p in prompt for p in ["maximo", "máximo", "3 oraciones", "parrafo"]), \
         "El system_prompt debe limitar la longitud de la respuesta"
