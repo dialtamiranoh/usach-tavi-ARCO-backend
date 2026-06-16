@@ -315,7 +315,8 @@ redacta una respuesta breve de orientacion para el usuario.
 
     except Exception as e:
         respuesta     = clean_model_text(item["respuesta"])
-        output_tokens = estimate_tokens(respuesta)
+        input_tokens  = 0
+        output_tokens = 0
         fallback      = True
         error         = str(e)
 
