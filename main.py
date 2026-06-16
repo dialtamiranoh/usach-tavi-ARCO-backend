@@ -67,6 +67,13 @@ MODELS = {
 LLM_TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", "0.1"))
 LLM_MAX_TOKENS  = int(os.getenv("LLM_MAX_TOKENS",  "140"))
 
+# Cargar prompts al iniciar
+_prompts_path = BASE_DIR / "prompts.json"
+with open(_prompts_path, "r", encoding="utf-8") as _f:
+    _prompts_data = json.load(_f)
+_version_activa = os.getenv("PROMPT_VERSION", _prompts_data["version_activa"])
+SYSTEM_PROMPT = _prompts_data["versiones"][_version_activa]["system_prompt"]
+
 # ---------------------------------------------------------------------------
 # RAG (opcional — activa con USE_RAG=true en .env)
 # ---------------------------------------------------------------------------
@@ -236,18 +243,8 @@ def call_llm(
 ) -> tuple[str, dict]:
     cfg = MODELS[model_key]
 
-    system_prompt = (
-        "eres ARCO, un asistente para el registro civil y su orientacion. "
-        "responde solo con la informacion entregada. "
-        "no inventes requisitos, costos, plazos ni pasos. "
-        "responde en espanol claro, breve y natural. "
-        "usa un solo parrafo, sin listas y con maximo 3 oraciones. "
-        "si la consulta es ambigua porque puede corresponder a distintos tramites segun "
-        "si el usuario es chileno o extranjero, haz una sola pregunta de clarificacion. "
-        "si la pregunta es de seguimiento, responde considerando que el usuario sigue hablando del mismo tramite. "
-        "menciona claramente el costo del tramite si esta disponible. "
-        "menciona si requiere presencialidad, si requiere clave unica y termina con la fuente oficial."
-    )
+    # Cargar prompt desde prompts.json
+    system_prompt = SYSTEM_PROMPT
 
     history_text = build_history_text(history)
     context_text = f"""
