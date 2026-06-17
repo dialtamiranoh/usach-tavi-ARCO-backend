@@ -187,7 +187,7 @@ Para usar Granite u otro modelo compatible:
 1. Descargar el modelo `.gguf`
 2. Editar `.env`:
 ```env
-LLM_MODEL_PATH=C:/Users/TU_USUARIO/models/granite-3.1-2b-a800m-instruct-q4_k_m.gguf
+LLM_MODEL_PATH=C:/Users/TU_USUARIO/models/granite-4.0-1b-a800m-instruct-q4_k_m.gguf
 ```
 3. Reiniciar el servidor del modelo (Terminal 1)
 
@@ -242,7 +242,7 @@ Recibe una consulta y devuelve orientación sobre el trámite.
 
 ### Alta prioridad (Sprint 2)
 - [ ] Lógica de detección de ambigüedad en `main.py` con campo `ambiguo` en `knowledge.json`
-- [ ] Benchmark comparativo Qwen2.5-1.5B vs Granite-3.1-2B (tiempo de respuesta y calidad)
+- [ ] Benchmark comparativo Qwen2.5-1.5B vs Granite-4.0-1B (tiempo de respuesta y calidad)
 - [ ] Soporte para archivos `.docx` en el ingestor
 - [ ] Merge de `feature/dynamic-llm` a `main` con pruebas de regresión
 
@@ -380,7 +380,7 @@ Abrir con Live Server (VS Code) o directamente en el navegador:
 
 ```env
 GRANITE_URL=http://127.0.0.1:8001/v1/chat/completions
-GRANITE_MODEL=granite-3.1-2b-instruct
+GRANITE_MODEL=granite-4.0-1b-instruct
 
 QWEN_URL=http://127.0.0.1:8002/v1/chat/completions
 QWEN_MODEL=qwen2.5-1.5b-instruct

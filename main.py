@@ -3,7 +3,7 @@ main.py — Backend unificado ARCO
 Puerto: 8000  →  uvicorn main:app --port 8000 --reload
 
 Modelos LLM disponibles:
-  granite → http://127.0.0.1:8001  (Granite-3.1-2B)
+  granite → http://127.0.0.1:8001  (Granite-4.0-1B)
   qwen    → http://127.0.0.1:8002  (Qwen2.5-1.5B)
 
 Archivos de persistencia:
@@ -54,8 +54,8 @@ with open(KNOWLEDGE_PATH, "r", encoding="utf-8") as f:
 MODELS = {
     "granite": {
         "url":   os.getenv("GRANITE_URL",   "http://127.0.0.1:8001/v1/chat/completions"),
-        "model": os.getenv("GRANITE_MODEL", "granite-3.1-2b-instruct"),
-        "label": "Granite-3.1-2B",
+        "model": os.getenv("GRANITE_MODEL", "granite-4.0-1b-instruct"),
+        "label": "Granite-4.0-1B",
     },
     "qwen": {
         "url":   os.getenv("QWEN_URL",   "http://127.0.0.1:8002/v1/chat/completions"),
