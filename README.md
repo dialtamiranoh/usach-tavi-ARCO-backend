@@ -1,6 +1,6 @@
 # ARCO — Asistente para el Registro Civil y su Orientación
 
-**Rama activa:** `feature/mlops-pipeline`  
+**Rama activa:** `entrega-3` (`feature/mlops-pipeline` + `feature-dashboard`)  
 **Sprint:** 2  
 **Última actualización:** Junio 2026
 
@@ -50,7 +50,7 @@ Logging en `arco.log` con formato `timestamp INFO query=... modelo=... tramite=.
 | Frontend | HTML5 + CSS3 + JavaScript vanilla |
 | LLM — Granite | llama-cpp-python server :8001 |
 | LLM — Qwen | llama-cpp-python server :8002 |
-| Modelos | Granite-3.1-3B Q4_K_M / Qwen2.5-3B Q4_K_M GGUF |
+| Modelos | Granite-4.0-1B Q4_K_M / Qwen2.5-1.5B Q4_K_M GGUF |
 | RAG | ChromaDB + sentence-transformers |
 | Embeddings | paraphrase-multilingual-MiniLM-L12-v2 |
 | Recuperación fallback | Keywords normalizados sobre knowledge.json |
@@ -116,9 +116,9 @@ Editar `.env` con las rutas reales a los modelos:
 
 ```env
 GRANITE_URL=http://127.0.0.1:8001/v1/chat/completions
-GRANITE_MODEL=granite-3.1-3b-instruct
+GRANITE_MODEL=granite-4.0-1b-instruct
 QWEN_URL=http://127.0.0.1:8002/v1/chat/completions
-QWEN_MODEL=qwen2.5-3b-instruct
+QWEN_MODEL=qwen2.5-1.5b-instruct
 LLM_TEMPERATURE=0.1
 LLM_MAX_TOKENS=140
 USE_RAG=false
@@ -141,9 +141,9 @@ Abrir cuatro terminales con el venv activo:
 
 ```bash
 python -m llama_cpp.server \
-  --model "RUTA/granite-3.1-3b-a800m-instruct-q4_k_m.gguf" \
+  --model "RUTA/granite-4.0-1b-a800m-instruct-q4_k_m.gguf" \
   --host 127.0.0.1 --port 8001 \
-  --model_alias granite-3.1-3b-instruct --n_ctx 2048
+  --model_alias granite-4.0-1b-instruct --n_ctx 2048
 ```
 
 Verificar: `http://127.0.0.1:8001/health`
@@ -152,9 +152,9 @@ Verificar: `http://127.0.0.1:8001/health`
 
 ```bash
 python -m llama_cpp.server \
-  --model "RUTA/qwen2.5-3b-instruct-q4_k_m.gguf" \
+  --model "RUTA/qwen2.5-1.5b-instruct-q4_k_m.gguf" \
   --host 127.0.0.1 --port 8002 \
-  --model_alias qwen2.5-3b-instruct --n_ctx 2048
+  --model_alias qwen2.5-1.5b-instruct --n_ctx 2048
 ```
 
 Verificar: `http://127.0.0.1:8002/health`
@@ -203,6 +203,9 @@ Editar `.env`:
 ```env
 PROMPT_VERSION=1.0.0   # Prompt base
 PROMPT_VERSION=1.1.0   # Con clarificación de nacionalidad
+
+# Opcional si se ejecuta un modelo local por ruta directa
+LLM_MODEL_PATH=C:/Users/TU_USUARIO/models/granite-4.0-1b-a800m-instruct-q4_k_m.gguf
 ```
 
 Reiniciar el backend para aplicar el cambio.
@@ -257,7 +260,7 @@ uvicorn main:app --port 8000 --reload
   "requiere_clave_unica": "si",
   "fuente": "https://www.chileatiende.gob.cl/fichas/3445-pasaporte",
   "trace_id": "uuid",
-  "model_used": "Granite-3.1-3B",
+  "model_used": "Granite-4.0-1B",
   "latency_ms": 1200,
   "total_tokens": 320,
   "fallback": false
@@ -382,6 +385,9 @@ GitHub Actions
 
 ### Alta prioridad
 - [ ] Resolver TC-04 y TC-07 con RAG semántico activado
+- [ ] Lógica de detección de ambigüedad en `main.py` con campo `ambiguo` en `knowledge.json`
+- [ ] Benchmark comparativo Qwen2.5-1.5B vs Granite-4.0-1B (tiempo de respuesta y calidad)
+- [ ] Merge de `feature/dynamic-llm` a `main` con pruebas de regresión
 - [ ] Merge de `feature/mlops-pipeline` a `main`
 - [ ] Benchmark formal Granite vs Qwen con 20+ consultas documentadas
 
@@ -407,3 +413,121 @@ GitHub Actions
 
 **Profesor:** Daniel Gacitúa Vásquez  
 **Curso:** TAVI 2026-1 — Ingeniería de Ejecución en Computación e Informática, USACH
+
+---
+
+## Guía de ejecución con benchmark
+
+## Arquitectura
+
+```
+Granite (llama-server :8001) ──┐
+                                ├── main.py (:8000) ── index.html
+Qwen    (llama-server :8002) ──┘                  └── dashboard.html
+```
+
+Cada consulta enviada desde `index.html` llama a **ambos modelos en paralelo**.  
+La respuesta mostrada corresponde al modelo seleccionado; la del otro se guarda silenciosamente para benchmark.
+
+---
+
+## Requisitos previos
+
+- Python 3.11+ con entorno virtual activado
+- `llama-server` (llama.cpp) disponible en el PATH
+- Modelos descargados en `../modelos/`
+
+---
+
+## Paso 1 — Servidor Granite (terminal 1)
+
+```bash
+llama-server \
+  --model "../modelos/granite/granite-4.0-1b-a800m-instruct-Q4_K_M.gguf" \
+  --port 8001 \
+  --ctx-size 2048 \
+  --n-predict 140 \
+  -ngl 0
+```
+
+Verificar: http://127.0.0.1:8001/health → `{"status":"ok"}`
+
+---
+
+## Paso 2 — Servidor Qwen (terminal 2)
+
+```bash
+llama-server \
+  --model "../modelos/qwen/Qwen2.5-1.5B-Instruct-Q4_K_M.gguf" \
+  --port 8002 \
+  --ctx-size 2048 \
+  --n-predict 140 \
+  -ngl 0
+```
+
+Verificar: http://127.0.0.1:8002/health → `{"status":"ok"}`
+
+---
+
+## Paso 3 — Backend ARCO (terminal 3)
+
+```bash
+cd usach-tavi-ARCO-backend
+.venv\Scripts\activate          # Windows
+# source .venv/bin/activate     # Linux/Mac
+
+uvicorn main:app --port 8000 --reload
+```
+
+Verificar: http://127.0.0.1:8000 → lista los dos modelos activos
+
+---
+
+## Paso 4 — Frontend
+
+Abrir con Live Server (VS Code) o directamente en el navegador:
+
+| Archivo | URL | Función |
+|---|---|---|
+| `index.html` | http://127.0.0.1:5500/index.html | Chat con selector de modelo |
+| `dashboard.html` | http://127.0.0.1:5500/dashboard.html | Dashboard de benchmark |
+
+---
+
+## Variables de entorno (`.env`)
+
+```env
+GRANITE_URL=http://127.0.0.1:8001/v1/chat/completions
+GRANITE_MODEL=granite-4.0-1b-instruct
+
+QWEN_URL=http://127.0.0.1:8002/v1/chat/completions
+QWEN_MODEL=qwen2.5-1.5b-instruct
+
+LLM_TEMPERATURE=0.1
+LLM_MAX_TOKENS=140
+
+USE_RAG=false
+```
+
+---
+
+## Archivos de datos
+
+| Archivo | Contenido |
+|---|---|
+| `benchmark_metrics.jsonl` | Una línea por consulta con latencia, tokens, modelo y trámite |
+| `benchmark_feedback.jsonl` | Feedback (👍/🤔/👎) por `trace_id` |
+
+---
+
+## Endpoints disponibles
+
+| Método | Ruta | Descripción |
+|---|---|---|
+| `POST` | `/ask` | Consulta al modelo (`model: "granite"` o `"qwen"`) |
+| `GET` | `/models` | Lista modelos configurados |
+| `POST` | `/feedback` | Registra feedback de una respuesta |
+| `GET` | `/metrics` | Todas las métricas con feedback |
+| `GET` | `/stats` | Resumen global |
+| `GET` | `/stats/compare` | Comparación por modelo (dashboard) |
+| `GET` | `/metrics/timeline` | Latencia en el tiempo por modelo |
