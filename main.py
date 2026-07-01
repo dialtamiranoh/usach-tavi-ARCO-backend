@@ -11,7 +11,8 @@ Archivos de persistencia:
   benchmark_feedback.jsonl — feedback por trace_id
 """
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.responses import PlainTextResponse, HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field
@@ -76,13 +77,23 @@ MODELS = {
     },
     "qwen": {
         "url":   os.getenv("QWEN_URL",   "http://127.0.0.1:8002/v1/chat/completions"),
-        "model": os.getenv("QWEN_MODEL", "qwen2.5-1.5b-instruct"),
-        "label": "Qwen2.5-1.5B",
+        "model": os.getenv("QWEN_MODEL", "qwen2.5-3b-instruct"),
+        "label": "Qwen2.5-3B",
     },
 }
 
 LLM_TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", "0.1"))
 LLM_MAX_TOKENS  = int(os.getenv("LLM_MAX_TOKENS",  "140"))
+
+# ---------------------------------------------------------------------------
+# Configuración WhatsApp Cloud API
+# ---------------------------------------------------------------------------
+WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN", "")
+WHATSAPP_PHONE_NUMBER_ID = os.getenv("WHATSAPP_PHONE_NUMBER_ID", "")
+WHATSAPP_VERIFY_TOKEN = os.getenv("WHATSAPP_VERIFY_TOKEN", "arco_tavi_verify_token")
+WHATSAPP_GRAPH_VERSION = os.getenv("WHATSAPP_GRAPH_VERSION", "v22.0")
+WHATSAPP_DEFAULT_MODEL = os.getenv("WHATSAPP_DEFAULT_MODEL", "qwen")
+
 
 # Cargar prompts al iniciar
 _prompts_path = BASE_DIR / "prompts.json"
@@ -350,8 +361,257 @@ redacta una respuesta breve de orientacion para el usuario.
 
 
 # ---------------------------------------------------------------------------
+# WhatsApp Cloud API
+# ---------------------------------------------------------------------------
+
+def extract_whatsapp_message(payload: dict) -> Optional[tuple[str, str, bool]]:
+    """
+    Extrae el número del usuario y el texto recibido desde el payload de WhatsApp.
+
+    Retorna:
+      (from_number, text, True)  -> mensaje de texto normal del usuario
+      (from_number, text, False) -> mensaje no textual; se responde sin pasar por LLM
+      None                      -> evento sin mensaje útil, por ejemplo status updates
+    """
+    try:
+        entry = payload.get("entry", [])[0]
+        change = entry.get("changes", [])[0]
+        value = change.get("value", {})
+        messages = value.get("messages", [])
+
+        if not messages:
+            return None
+
+        message = messages[0]
+        from_number = message.get("from")
+        message_type = message.get("type")
+
+        if not from_number:
+            return None
+
+        if message_type != "text":
+            return (
+                from_number,
+                "Por ahora ARCO solo puede responder mensajes de texto. Escribe tu consulta sobre trámites del Registro Civil.",
+                False,
+            )
+
+        text = message.get("text", {}).get("body", "").strip()
+
+        if not text:
+            return None
+
+        return from_number, text, True
+
+    except (KeyError, IndexError, TypeError) as exc:
+        logger.warning("No se pudo extraer mensaje WhatsApp: %s", exc)
+        return None
+
+
+def build_whatsapp_reply(arco_response: dict) -> str:
+    """
+    Convierte la respuesta estructurada de ARCO en un mensaje compacto para WhatsApp.
+    """
+    tramite = arco_response.get("tramite") or "Trámite no identificado"
+    respuesta = arco_response.get("respuesta") or "No fue posible generar una respuesta."
+    costo = arco_response.get("costo")
+    duracion = arco_response.get("duracion")
+    fuente = arco_response.get("fuente")
+    modelo = arco_response.get("model_used")
+
+    partes = [
+        "ARCO - Orientación de trámite",
+        f"Trámite detectado: {tramite}",
+        "",
+        respuesta,
+    ]
+
+    if costo:
+        partes.append(f"\nCosto: {costo}")
+
+    if duracion:
+        partes.append(f"Duración: {duracion}")
+
+    if fuente:
+        partes.append(f"Fuente: {fuente}")
+
+    if modelo:
+        partes.append(f"Modelo usado: {modelo}")
+
+    partes.append("\nEsta orientación es informativa. Verifica siempre en canales oficiales.")
+
+    texto = "\n".join(partes)
+
+    # Para demo conviene mantenerlo compacto.
+    return texto[:3500]
+
+
+def send_whatsapp_message(to_number: str, text: str) -> bool:
+    """
+    Envía un mensaje de texto usando WhatsApp Cloud API.
+    """
+    if not WHATSAPP_TOKEN or not WHATSAPP_PHONE_NUMBER_ID:
+        logger.error("WhatsApp no configurado: falta WHATSAPP_TOKEN o WHATSAPP_PHONE_NUMBER_ID")
+        return False
+
+    url = (
+        f"https://graph.facebook.com/{WHATSAPP_GRAPH_VERSION}/"
+        f"{WHATSAPP_PHONE_NUMBER_ID}/messages"
+    )
+
+    headers = {
+        "Authorization": f"Bearer {WHATSAPP_TOKEN}",
+        "Content-Type": "application/json",
+    }
+
+    data = {
+        "messaging_product": "whatsapp",
+        "to": to_number,
+        "type": "text",
+        "text": {
+            "preview_url": True,
+            "body": text,
+        },
+    }
+
+    try:
+        response = requests.post(url, headers=headers, json=data, timeout=20)
+
+        if response.status_code >= 400:
+            logger.error("Error enviando WhatsApp: %s - %s", response.status_code, response.text)
+            return False
+
+        logger.info("Mensaje WhatsApp enviado correctamente a %s", to_number)
+        return True
+
+    except requests.RequestException as exc:
+        logger.error("Error de red enviando WhatsApp: %s", exc)
+        return False
+
+
+@app.get("/webhook/whatsapp")
+def verify_whatsapp_webhook(request: Request):
+    """
+    Verificación inicial del webhook desde Meta.
+    Meta llama esta ruta con hub.mode, hub.verify_token y hub.challenge.
+    """
+    mode = request.query_params.get("hub.mode")
+    token = request.query_params.get("hub.verify_token")
+    challenge = request.query_params.get("hub.challenge")
+
+    if mode == "subscribe" and token == WHATSAPP_VERIFY_TOKEN and challenge:
+        logger.info("Webhook de WhatsApp verificado correctamente")
+        return PlainTextResponse(content=challenge, status_code=200)
+
+    logger.warning("Fallo verificación webhook WhatsApp")
+    return PlainTextResponse(content="Token de verificación inválido", status_code=403)
+
+
+@app.post("/webhook/whatsapp")
+def receive_whatsapp_message(payload: dict):
+    """
+    Recibe mensajes entrantes desde WhatsApp, consulta ARCO y responde por WhatsApp.
+    """
+    logger.info("Webhook WhatsApp recibido")
+
+    extracted = extract_whatsapp_message(payload)
+
+    if not extracted:
+        return {"status": "ignored", "reason": "payload sin mensaje de texto"}
+
+    from_number, user_text, should_call_arco = extracted
+
+    logger.info("Mensaje WhatsApp desde %s: %s", from_number, user_text)
+
+    if not should_call_arco:
+        sent = send_whatsapp_message(from_number, user_text)
+        return {
+            "status": "processed",
+            "sent": sent,
+            "from": from_number,
+            "type": "non_text",
+        }
+
+    model_key = WHATSAPP_DEFAULT_MODEL if WHATSAPP_DEFAULT_MODEL in MODELS else "qwen"
+
+    question = Question(
+        query=user_text,
+        model=model_key,
+        history=[],
+        context=None,
+        trace_id=f"whatsapp-{uuid.uuid4()}",
+    )
+
+    arco_response = ask_question(question)
+    whatsapp_text = build_whatsapp_reply(arco_response)
+    sent = send_whatsapp_message(from_number, whatsapp_text)
+
+    return {
+        "status": "processed",
+        "sent": sent,
+        "from": from_number,
+        "model": model_key,
+        "tramite": arco_response.get("tramite"),
+        "trace_id": arco_response.get("trace_id"),
+    }
+
+
+# ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
+
+
+@app.get("/privacy-policy", response_class=HTMLResponse)
+def privacy_policy():
+    return """
+    <!DOCTYPE html>
+    <html lang="es">
+    <head>
+        <meta charset="UTF-8">
+        <title>Política de Privacidad - ARCO TAVI</title>
+    </head>
+    <body>
+        <h1>Política de Privacidad - ARCO TAVI</h1>
+
+        <p>
+            ARCO TAVI es un prototipo académico desarrollado para la asignatura
+            Taller de Agentes Virtuales Inteligentes de la Universidad de Santiago de Chile.
+        </p>
+
+        <h2>Datos procesados</h2>
+        <p>
+            El sistema puede recibir mensajes de texto enviados por usuarios mediante WhatsApp
+            con el objetivo de entregar orientación informativa sobre trámites del Registro Civil.
+        </p>
+
+        <h2>Uso de la información</h2>
+        <p>
+            Los mensajes se utilizan únicamente para generar una respuesta automática dentro del
+            contexto del prototipo académico. No se venden datos personales ni se comparten con
+            terceros para fines comerciales.
+        </p>
+
+        <h2>Registro de métricas</h2>
+        <p>
+            El sistema puede almacenar métricas técnicas como fecha de consulta, trámite detectado,
+            modelo utilizado, latencia, cantidad de tokens y si hubo fallback. Estas métricas se usan
+            solo para evaluación académica y mejora del prototipo.
+        </p>
+
+        <h2>Limitaciones</h2>
+        <p>
+            ARCO TAVI entrega orientación informativa. La información oficial debe verificarse
+            siempre en los canales oficiales correspondientes.
+        </p>
+
+        <h2>Contacto</h2>
+        <p>
+            Para consultas sobre este prototipo, contactar al equipo desarrollador del proyecto ARCO TAVI.
+        </p>
+    </body>
+    </html>
+    """
+
 
 @app.get("/")
 def root():
