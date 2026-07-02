@@ -16,11 +16,11 @@ ARCO es un asistente conversacional que responde preguntas en lenguaje natural s
 
 ## Novedades Sprint 2
 
-### 1. Soporte dual de modelos LLM (Granite y Qwen)
-El backend soporta dos modelos simultáneamente configurables via `.env`. Cada consulta registra el modelo utilizado en el benchmark. El frontend permite seleccionar el modelo activo y ejecuta silenciosamente el otro para comparación.
+### 1. Un único modelo LLM en producción
+`main.py` sirve **un solo modelo** (configurable vía `LLM_URL` / `LLM_MODEL_ID` / `LLM_LABEL` en `.env`, por defecto Granite-4.0-1B). `index.html` ya no tiene selector de modelo ni dispara una segunda consulta silenciosa: cada pregunta llama una sola vez a `/ask`. Comparar varios modelos entre sí es responsabilidad exclusiva de `dashboard.py`.
 
-### 2. Benchmark automático con dashboard
-Cada consulta se registra en `benchmark_metrics.jsonl` con latencia, tokens, modelo y trámite. El feedback del usuario (👍/🤔/👎) se guarda en `benchmark_feedback.jsonl`. El dashboard `dashboard.html` muestra comparación en tiempo real entre Granite y Qwen.
+### 2. Dashboard de benchmark independiente (`dashboard.py` + `dashboard.html`)
+El benchmark comparativo entre modelos vive en un servicio separado de `main.py`: **`dashboard.py`** (puerto 8090). Busca archivos `.gguf` en el sistema (`../modelos/` por defecto, más rutas adicionales configurables desde la propia UI), levanta y detiene servidores `llama_cpp.server` para cualquier modelo seleccionado (no solo Granite/Qwen) y envía la misma consulta a N modelos en paralelo. Cada consulta se registra en `dashboard_metrics.jsonl` con latencia total, **time-to-first-token (TTFT)**, **tokens/segundo** y tokens de entrada/salida. El feedback (👍/🤔/👎) se guarda en `dashboard_feedback.jsonl`. El frontend `dashboard.html` es independiente de `index.html` y solo conversa con `dashboard.py`. Ver [Dashboard de benchmark](#dashboard-de-benchmark-dashboardpy) más abajo.
 
 ### 3. RAG con ChromaDB e ingestión dinámica
 Pipeline de Retrieval-Augmented Generation usando ChromaDB y embeddings `paraphrase-multilingual-MiniLM-L12-v2`. El script `ingest.py` procesa `knowledge.json` y documentos adicionales (PDF, TXT) desde la carpeta `docs/` con deduplicación por hash MD5.
@@ -48,9 +48,8 @@ Logging en `arco.log` con formato `timestamp INFO query=... modelo=... tramite=.
 |---|---|
 | Backend | Python 3.11 + FastAPI + Uvicorn |
 | Frontend | HTML5 + CSS3 + JavaScript vanilla |
-| LLM — Granite | llama-cpp-python server :8001 |
-| LLM — Qwen | llama-cpp-python server :8002 |
-| Modelos | Granite-4.0-1B Q4_K_M / Qwen2.5-1.5B Q4_K_M GGUF |
+| LLM (main.py, producción) | llama-cpp-python server, 1 modelo — Granite-4.0-1B Q4_K_M por defecto |
+| LLM (dashboard.py, benchmark) | llama-cpp-python server, N modelos `.gguf` a elección |
 | RAG | ChromaDB + sentence-transformers |
 | Embeddings | paraphrase-multilingual-MiniLM-L12-v2 |
 | Recuperación fallback | Keywords normalizados sobre knowledge.json |
@@ -112,13 +111,12 @@ pip install "llama-cpp-python[server]"
 cp .env.example .env
 ```
 
-Editar `.env` con las rutas reales a los modelos:
+Editar `.env` con la ruta real al modelo que usará `main.py`:
 
 ```env
-GRANITE_URL=http://127.0.0.1:8001/v1/chat/completions
-GRANITE_MODEL=granite-4.0-1b-instruct
-QWEN_URL=http://127.0.0.1:8002/v1/chat/completions
-QWEN_MODEL=qwen2.5-1.5b-instruct
+LLM_URL=http://127.0.0.1:8001/v1/chat/completions
+LLM_MODEL_ID=granite-4.0-1b-instruct
+LLM_LABEL=Granite-4.0-1B
 LLM_TEMPERATURE=0.1
 LLM_MAX_TOKENS=140
 USE_RAG=false
@@ -135,9 +133,9 @@ python ingest.py
 
 ## Ejecución
 
-Abrir cuatro terminales con el venv activo:
+Abrir tres terminales con el venv activo:
 
-### Terminal 1 — Modelo Granite
+### Terminal 1 — Modelo LLM (el que apunte `LLM_URL` en `.env`)
 
 ```bash
 python -m llama_cpp.server \
@@ -146,20 +144,9 @@ python -m llama_cpp.server \
   --model_alias granite-4.0-1b-instruct --n_ctx 2048
 ```
 
-Verificar: `http://127.0.0.1:8001/health`
+Verificar: `http://127.0.0.1:8001/v1/models`
 
-### Terminal 2 — Modelo Qwen
-
-```bash
-python -m llama_cpp.server \
-  --model "RUTA/qwen2.5-1.5b-instruct-q4_k_m.gguf" \
-  --host 127.0.0.1 --port 8002 \
-  --model_alias qwen2.5-1.5b-instruct --n_ctx 2048
-```
-
-Verificar: `http://127.0.0.1:8002/health`
-
-### Terminal 3 — Backend
+### Terminal 2 — Backend
 
 ```bash
 cd usach-tavi-ARCO-backend
@@ -168,7 +155,7 @@ uvicorn main:app --port 8000 --reload
 
 Verificar: `http://127.0.0.1:8000`
 
-### Terminal 4 — Frontend
+### Terminal 3 — Frontend
 
 ```bash
 cd usach-tavi-ARCO-frontend
@@ -177,7 +164,15 @@ python -m http.server 5500
 
 Abrir en el navegador:
 - Chat: `http://127.0.0.1:5500/index.html`
-- Dashboard benchmark: `http://127.0.0.1:5500/dashboard.html`
+
+### Terminal 4 — Dashboard de benchmark (opcional)
+
+```bash
+cd usach-tavi-ARCO-backend
+uvicorn dashboard:app --port 8090 --reload
+```
+
+Abrir `http://127.0.0.1:5500/dashboard.html`. A diferencia del modelo de la Terminal 1, **este dashboard levanta sus propios modelos**: no necesitas tenerlos corriendo de antemano. Ver [Dashboard de benchmark](#dashboard-de-benchmark-dashboardpy).
 
 ---
 
@@ -193,9 +188,9 @@ Abrir en el navegador:
 | "necesito un papel para viajar fuera de Chile" | Pasaporte (con RAG activado) |
 | "quiero renovar mi licencia de conducir" | Fallback: fuera del dominio de ARCO |
 
-### Cambiar modelo activo
+### Cambiar el modelo de producción
 
-En `index.html` seleccionar Granite o Qwen desde el selector. El modelo no seleccionado corre en segundo plano para el benchmark.
+Editar `LLM_URL`, `LLM_MODEL_ID` y `LLM_LABEL` en `.env` y reiniciar `main.py`. Para comparar modelos entre sí sin tocar producción, usar `dashboard.py`.
 
 ### Cambiar versión del prompt
 
@@ -225,25 +220,21 @@ uvicorn main:app --port 8000 --reload
 
 ---
 
-## API
+## API — main.py (producción, puerto 8000)
 
 | Método | Ruta | Descripción |
 |---|---|---|
-| GET | `/` | Estado del backend y modelos activos |
-| GET | `/models` | Lista modelos configurados |
-| POST | `/ask` | Consulta al modelo seleccionado |
-| POST | `/feedback` | Registra feedback de una respuesta |
-| GET | `/metrics` | Todas las métricas con feedback |
-| GET | `/stats` | Resumen global |
-| GET | `/stats/compare` | Comparación Granite vs Qwen |
-| GET | `/metrics/timeline` | Latencia en el tiempo por modelo |
+| GET | `/` | Estado del backend y del modelo activo |
+| GET | `/models` | Info del modelo configurado (url, model_id, label) |
+| POST | `/ask` | Consulta al modelo |
+
+El benchmark, las métricas y el feedback quedaron fuera de `main.py`; viven en `dashboard.py` (ver más abajo).
 
 ### Ejemplo POST /ask
 
 ```json
 {
   "query": "quiero sacar mi pasaporte",
-  "model": "granite",
   "history": [],
   "context": null
 }
@@ -321,7 +312,8 @@ TC-04 y TC-07 fallan porque el keyword search por substring no resuelve ambigüe
 
 ```
 usach-tavi-ARCO-backend/
-├── main.py                  # Backend FastAPI — dual modelo, RAG, benchmark, métricas
+├── main.py                  # Backend FastAPI de producción — 1 modelo LLM, RAG, WhatsApp
+├── dashboard.py              # Backend FastAPI de benchmark — descubre/levanta modelos .gguf, TTFT, métricas
 ├── ingest.py                # Ingestión dinámica PDF/TXT con hash MD5
 ├── knowledge.json           # Corpus 21 trámites Registro Civil
 ├── prompts.json             # Versionado de prompts (v1.0.0 y v1.1.0)
@@ -343,6 +335,7 @@ usach-tavi-ARCO-backend/
 │   └── reporte_latest.json  # Último reporte generado
 ├── docs/                    # Documentos adicionales para RAG (no sube a git)
 ├── chroma_db/               # Base de datos vectorial ChromaDB (no sube a git)
+├── logs/                    # Logs por modelo lanzado desde dashboard.py (no sube a git)
 └── .github/
     └── workflows/
         └── ci.yml           # Pipeline CI/CD GitHub Actions
@@ -373,9 +366,10 @@ GitHub Actions
 
 | Archivo | Contenido |
 |---|---|
-| `benchmark_metrics.jsonl` | Una línea por consulta con latencia, tokens, modelo y trámite |
-| `benchmark_feedback.jsonl` | Feedback (👍/🤔/👎) por `trace_id` |
-| `arco.log` | Log estructurado de consultas |
+| `dashboard_metrics.jsonl` | Una línea por (consulta, modelo) desde `dashboard.py`: latencia, TTFT, tokens/seg, tokens, trámite |
+| `dashboard_feedback.jsonl` | Feedback (👍/🤔/👎) por (`trace_id`, `alias`) desde `dashboard.py` |
+| `arco.log` | Log estructurado de consultas de `main.py` |
+| `logs/<alias>.log` | Salida de cada servidor `llama_cpp.server` lanzado por `dashboard.py` |
 | `chroma_db/` | Base vectorial ChromaDB |
 | `docs/` | Documentos adicionales para RAG |
 
@@ -416,118 +410,76 @@ GitHub Actions
 
 ---
 
-## Guía de ejecución con benchmark
+## Dashboard de benchmark (`dashboard.py`)
 
-## Arquitectura
+`dashboard.py` es un servicio FastAPI **independiente de `main.py`**, pensado para comparar cualquier cantidad de modelos `.gguf` sin editar `.env` ni reiniciar nada a mano.
 
 ```
-Granite (llama-server :8001) ──┐
-                                ├── main.py (:8000) ── index.html
-Qwen    (llama-server :8002) ──┘                  └── dashboard.html
+dashboard.py (:8090)
+  ├── GET  /gguf/scan          busca .gguf en ../modelos/ + carpetas extra
+  ├── GET  /system/info        hilos de CPU detectados y modelos activos
+  ├── POST /models/launch      levanta un lote de .gguf a la vez (puerto y n_threads automáticos)
+  ├── POST /models/stop        detiene un servidor
+  ├── GET  /models/status      estado de cada modelo levantado (starting / ready / error)
+  ├── POST /ask                envía la misma consulta a N modelos ready, en paralelo, midiendo TTFT
+  ├── POST /feedback           feedback (trace_id, alias, score)
+  ├── GET  /metrics            historial completo con feedback
+  ├── GET  /stats/compare      agregados por modelo (latencia, TTFT, tokens/seg, feedback)
+  └── GET  /metrics/timeline   series de tiempo por modelo (últimas 50 consultas)
 ```
 
-Cada consulta enviada desde `index.html` llama a **ambos modelos en paralelo**.  
-La respuesta mostrada corresponde al modelo seleccionado; la del otro se guarda silenciosamente para benchmark.
+`dashboard.html` consume exclusivamente esta API (no `main.py`) y permite: buscar `.gguf` en el sistema, seleccionarlos y levantarlos con un clic, elegir cuáles usar en una consulta y comparar respuestas y métricas lado a lado.
 
----
+### Comparación en paralelo, sin que los modelos se pisen la CPU
 
-## Requisitos previos
+`POST /ask` ya despachaba las N consultas simultáneamente (`ThreadPoolExecutor`), pero eso no bastaba para una comparación limpia: cada `llama_cpp.server` reserva por defecto la mitad de los cores para generar texto y **todos** los cores para procesar el prompt — si corres 2 modelos a la vez, ambos compiten justo en la ventana que mide el TTFT.
 
-- Python 3.11+ con entorno virtual activado
-- `llama-server` (llama.cpp) disponible en el PATH
-- Modelos descargados en `../modelos/`
+Por eso `POST /models/launch` recibe una **lista** de `.gguf` (`{"paths": [...]}`) y reparte `os.cpu_count()` entre todos los modelos que van a quedar activos, pasando `--n_threads`/`--n_threads_batch` explícitos a cada `llama_cpp.server`. `GET /system/info` expone cuántos hilos detectó la máquina, y `GET /models/status` incluye `n_threads` por modelo. En una prueba real con 2 modelos (8 hilos → 4 c/u), el tiempo total de un `/ask` con ambos coincidió con la latencia individual de cada uno (no con la suma), confirmando que corren en paralelo de verdad.
 
----
+Limitación conocida: el reparto se calcula al momento de lanzar; si agregas un modelo nuevo mientras otros ya están `ready`, esos no se reinician para achicar su cuota. Para una comparación perfectamente pareja, selecciona todos los modelos a comparar y presiona "Levantar seleccionados" una sola vez.
 
-## Paso 1 — Servidor Granite (terminal 1)
-
-```bash
-llama-server \
-  --model "../modelos/granite/granite-4.0-1b-a800m-instruct-Q4_K_M.gguf" \
-  --port 8001 \
-  --ctx-size 2048 \
-  --n-predict 140 \
-  -ngl 0
-```
-
-Verificar: http://127.0.0.1:8001/health → `{"status":"ok"}`
-
----
-
-## Paso 2 — Servidor Qwen (terminal 2)
-
-```bash
-llama-server \
-  --model "../modelos/qwen/Qwen2.5-1.5B-Instruct-Q4_K_M.gguf" \
-  --port 8002 \
-  --ctx-size 2048 \
-  --n-predict 140 \
-  -ngl 0
-```
-
-Verificar: http://127.0.0.1:8002/health → `{"status":"ok"}`
-
----
-
-## Paso 3 — Backend ARCO (terminal 3)
+### Ejecutarlo
 
 ```bash
 cd usach-tavi-ARCO-backend
-.venv\Scripts\activate          # Windows
-# source .venv/bin/activate     # Linux/Mac
-
-uvicorn main:app --port 8000 --reload
+uvicorn dashboard:app --port 8090 --reload
 ```
 
-Verificar: http://127.0.0.1:8000 → lista los dos modelos activos
+```bash
+cd usach-tavi-ARCO-frontend
+python -m http.server 5500
+# abrir http://127.0.0.1:5500/dashboard.html
+```
 
----
+No hace falta tener ningún `llama_cpp.server` corriendo de antemano: se levantan desde la pestaña **Modelos** del dashboard al seleccionar un `.gguf`.
 
-## Paso 4 — Frontend
+### Métricas por consulta
 
-Abrir con Live Server (VS Code) o directamente en el navegador:
+| Métrica | Qué mide |
+|---|---|
+| `latency_ms` | Tiempo total desde el envío hasta la última respuesta del modelo |
+| `ttft_ms` | **Time-to-first-token** — tiempo hasta que llega el primer fragmento generado (streaming) |
+| `tokens_per_sec` | Tokens de salida ÷ tiempo de generación tras el primer token — throughput real del modelo |
+| `input_tokens` / `output_tokens` / `total_tokens` | Estimados por caracteres (`llama_cpp.server` no reporta `usage` en modo streaming) |
+| `error` | Mensaje de error si la llamada al modelo falló; `dashboard.py` no fabrica una respuesta de respaldo — si falla, se registra el error y no hay `respuesta` |
 
-| Archivo | URL | Función |
-|---|---|---|
-| `index.html` | http://127.0.0.1:5500/index.html | Chat con selector de modelo |
-| `dashboard.html` | http://127.0.0.1:5500/dashboard.html | Dashboard de benchmark |
-
----
-
-## Variables de entorno (`.env`)
+### Variables de entorno relevantes
 
 ```env
-GRANITE_URL=http://127.0.0.1:8001/v1/chat/completions
-GRANITE_MODEL=granite-4.0-1b-instruct
+# Carpetas donde dashboard.py busca .gguf, separadas por ";" (además de ../modelos/ por defecto)
+DASHBOARD_MODEL_DIRS=
 
-QWEN_URL=http://127.0.0.1:8002/v1/chat/completions
-QWEN_MODEL=qwen2.5-1.5b-instruct
+# Host/puerto base para los llama_cpp.server que dashboard.py lanza
+DASHBOARD_LLAMA_HOST=127.0.0.1
+DASHBOARD_LLAMA_PORT_START=8600
 
-LLM_TEMPERATURE=0.1
-LLM_MAX_TOKENS=140
+# Contexto por defecto y timeout de arranque (segundos) para cada modelo levantado
+DASHBOARD_N_CTX=2048
+DASHBOARD_HEALTH_TIMEOUT=180
 
-USE_RAG=false
+# Fuerza un n_threads fijo por modelo en vez del reparto automático
+# (CPU_THREADS ÷ modelos activos). Déjala vacía salvo que sepas lo que haces.
+DASHBOARD_N_THREADS=
 ```
 
----
-
-## Archivos de datos
-
-| Archivo | Contenido |
-|---|---|
-| `benchmark_metrics.jsonl` | Una línea por consulta con latencia, tokens, modelo y trámite |
-| `benchmark_feedback.jsonl` | Feedback (👍/🤔/👎) por `trace_id` |
-
----
-
-## Endpoints disponibles
-
-| Método | Ruta | Descripción |
-|---|---|---|
-| `POST` | `/ask` | Consulta al modelo (`model: "granite"` o `"qwen"`) |
-| `GET` | `/models` | Lista modelos configurados |
-| `POST` | `/feedback` | Registra feedback de una respuesta |
-| `GET` | `/metrics` | Todas las métricas con feedback |
-| `GET` | `/stats` | Resumen global |
-| `GET` | `/stats/compare` | Comparación por modelo (dashboard) |
-| `GET` | `/metrics/timeline` | Latencia en el tiempo por modelo |
+`LLM_TEMPERATURE`, `LLM_MAX_TOKENS` y `PROMPT_VERSION` son compartidos con `main.py` (mismo `.env`, mismo `prompts.json`).

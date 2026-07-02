@@ -15,14 +15,15 @@ def test_root_responde():
     assert response.status_code == 200
     data = response.json()
     assert "message" in data
-    assert "modelos" in data
+    assert "modelo" in data
 
 def test_models_endpoint():
     response = client.get("/models")
     assert response.status_code == 200
     data = response.json()
-    assert "granite" in data
-    assert "qwen" in data
+    assert "label" in data
+    assert "url" in data
+    assert "model_id" in data
 
 def test_ask_pasaporte_keyword():
     with patch("main.call_llm") as mock_llm:

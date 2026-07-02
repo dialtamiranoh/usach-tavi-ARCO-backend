@@ -1,14 +1,10 @@
 """
-main.py — Backend unificado ARCO
+main.py — Backend de producción ARCO
 Puerto: 8000  →  uvicorn main:app --port 8000 --reload
 
-Modelos LLM disponibles:
-  granite → http://127.0.0.1:8001  (Granite-4.0-1B)
-  qwen    → http://127.0.0.1:8002  (Qwen2.5-1.5B)
-
-Archivos de persistencia:
-  benchmark_metrics.jsonl  — una línea por consulta (campo model_key)
-  benchmark_feedback.jsonl — feedback por trace_id
+Sirve un único modelo LLM (configurado via LLM_URL / LLM_MODEL_ID / LLM_LABEL
+en .env). La comparación entre múltiples modelos .gguf (búsqueda, arranque,
+TTFT, tokens/seg, etc.) vive en dashboard.py, un servicio independiente.
 """
 
 from fastapi import FastAPI, Request
@@ -17,7 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field
 from pathlib import Path
-from typing import Optional, Literal
+from typing import Optional
 import json
 import unicodedata
 import requests
@@ -60,26 +56,17 @@ app.add_middleware(
 # ---------------------------------------------------------------------------
 BASE_DIR       = Path(__file__).resolve().parent
 KNOWLEDGE_PATH = BASE_DIR / "knowledge.json"
-METRICS_PATH   = BASE_DIR / "benchmark_metrics.jsonl"
-FEEDBACK_PATH  = BASE_DIR / "benchmark_feedback.jsonl"
 
 with open(KNOWLEDGE_PATH, "r", encoding="utf-8") as f:
     KNOWLEDGE = json.load(f)
 
 # ---------------------------------------------------------------------------
-# Configuración de modelos
+# Configuración del modelo (uno solo)
 # ---------------------------------------------------------------------------
-MODELS = {
-    "granite": {
-        "url":   os.getenv("GRANITE_URL",   "http://127.0.0.1:8001/v1/chat/completions"),
-        "model": os.getenv("GRANITE_MODEL", "granite-4.0-1b-instruct"),
-        "label": "Granite-4.0-1B",
-    },
-    "qwen": {
-        "url":   os.getenv("QWEN_URL",   "http://127.0.0.1:8002/v1/chat/completions"),
-        "model": os.getenv("QWEN_MODEL", "qwen2.5-3b-instruct"),
-        "label": "Qwen2.5-3B",
-    },
+MODEL = {
+    "url":   os.getenv("LLM_URL",      "http://127.0.0.1:8001/v1/chat/completions"),
+    "model": os.getenv("LLM_MODEL_ID", "granite-4.0-1b-instruct"),
+    "label": os.getenv("LLM_LABEL",    "Granite-4.0-1B"),
 }
 
 LLM_TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", "0.1"))
@@ -92,7 +79,6 @@ WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN", "")
 WHATSAPP_PHONE_NUMBER_ID = os.getenv("WHATSAPP_PHONE_NUMBER_ID", "")
 WHATSAPP_VERIFY_TOKEN = os.getenv("WHATSAPP_VERIFY_TOKEN", "arco_tavi_verify_token")
 WHATSAPP_GRAPH_VERSION = os.getenv("WHATSAPP_GRAPH_VERSION", "v22.0")
-WHATSAPP_DEFAULT_MODEL = os.getenv("WHATSAPP_DEFAULT_MODEL", "qwen")
 
 
 # Cargar prompts al iniciar
@@ -164,17 +150,9 @@ class ContextData(BaseModel):
 
 class Question(BaseModel):
     query:    str
-    model:    Literal["granite", "qwen"] = "granite"
     history:  list[ChatMessage] = Field(default_factory=list)
     context:  Optional[ContextData] = None
     trace_id: Optional[str] = None
-
-
-class Feedback(BaseModel):
-    trace_id: str
-    model:    str
-    score:    float    # 1.0 positivo · 0.5 neutral · 0.0 negativo
-    comment:  Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -231,34 +209,6 @@ def build_history_text(history: list[ChatMessage]) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Persistencia
-# ---------------------------------------------------------------------------
-
-def save_metric(entry: dict) -> None:
-    with open(METRICS_PATH, "a", encoding="utf-8") as f:
-        f.write(json.dumps(entry, ensure_ascii=False) + "\n")
-
-
-def save_feedback_entry(entry: dict) -> None:
-    with open(FEEDBACK_PATH, "a", encoding="utf-8") as f:
-        f.write(json.dumps(entry, ensure_ascii=False) + "\n")
-
-
-def load_metrics() -> list[dict]:
-    if not METRICS_PATH.exists():
-        return []
-    with open(METRICS_PATH, "r", encoding="utf-8") as f:
-        return [json.loads(line) for line in f if line.strip()]
-
-
-def load_feedbacks() -> list[dict]:
-    if not FEEDBACK_PATH.exists():
-        return []
-    with open(FEEDBACK_PATH, "r", encoding="utf-8") as f:
-        return [json.loads(line) for line in f if line.strip()]
-
-
-# ---------------------------------------------------------------------------
 # Llamada al LLM
 # ---------------------------------------------------------------------------
 
@@ -266,10 +216,9 @@ def call_llm(
     user_query: str,
     item: dict,
     history: list[ChatMessage],
-    model_key: str,
     using_previous_context: bool = False,
 ) -> tuple[str, dict]:
-    cfg = MODELS[model_key]
+    cfg = MODEL
 
     # Cargar prompt desde prompts.json
     system_prompt = SYSTEM_PROMPT
@@ -354,7 +303,6 @@ redacta una respuesta breve de orientacion para el usuario.
         "total_tokens":  input_tokens + output_tokens,
         "fallback":      fallback,
         "error":         error,
-        "model_key":     model_key,
         "model_label":   cfg["label"],
         "model_id":      cfg["model"],
     }
@@ -532,11 +480,8 @@ def receive_whatsapp_message(payload: dict):
             "type": "non_text",
         }
 
-    model_key = WHATSAPP_DEFAULT_MODEL if WHATSAPP_DEFAULT_MODEL in MODELS else "qwen"
-
     question = Question(
         query=user_text,
-        model=model_key,
         history=[],
         context=None,
         trace_id=f"whatsapp-{uuid.uuid4()}",
@@ -550,7 +495,6 @@ def receive_whatsapp_message(payload: dict):
         "status": "processed",
         "sent": sent,
         "from": from_number,
-        "model": model_key,
         "tramite": arco_response.get("tramite"),
         "trace_id": arco_response.get("trace_id"),
     }
@@ -616,24 +560,20 @@ def privacy_policy():
 @app.get("/")
 def root():
     return {
-        "message": "ARCO backend unificado",
-        "modelos": {k: v["label"] for k, v in MODELS.items()},
+        "message": "ARCO backend de producción",
+        "modelo": MODEL["label"],
     }
 
 
 @app.get("/models")
 def get_models():
-    return {
-        k: {"label": v["label"], "url": v["url"], "model_id": v["model"]}
-        for k, v in MODELS.items()
-    }
+    return {"label": MODEL["label"], "url": MODEL["url"], "model_id": MODEL["model"]}
 
 
 @app.post("/ask")
 def ask_question(question: Question):
     trace_id  = question.trace_id or str(uuid.uuid4())
     query     = normalize_text(question.query)
-    model_key = question.model
 
     matched_item           = None
     using_previous_context = False
@@ -672,21 +612,12 @@ def ask_question(question: Question):
             "La renovacion de licencia de conducir no corresponde al Registro Civil. "
             "ARCO esta enfocado en tramites del Registro Civil y su orientacion."
         )
-        save_metric({
-            "trace_id": trace_id, "timestamp": datetime.now().isoformat(),
-            "tramite": "Fuera del alcance", "user_query": question.query,
-            "respuesta": respuesta, "latency_ms": 0,
-            "input_tokens": 0, "output_tokens": 0, "total_tokens": 0,
-            "fallback": False, "error": None,
-            "model_key": model_key, "model_label": MODELS[model_key]["label"],
-            "model_id": MODELS[model_key]["model"], "using_previous_context": False,
-        })
         return {
             "tramite": "Fuera del alcance de ARCO", "respuesta": respuesta,
             "respuesta_base": None, "costo": None, "duracion": None,
             "canal": None, "presencialidad": None, "requiere_clave_unica": None,
             "fuente": "https://www.chileatiende.gob.cl/fichas/20592-licencias-de-conducir",
-            "trace_id": trace_id, "model_used": MODELS[model_key]["label"],
+            "trace_id": trace_id, "model_used": MODEL["label"],
         }
 
     # Seguimiento de contexto previo
@@ -698,7 +629,6 @@ def ask_question(question: Question):
 
     logger.info(
         f"query='{question.query}' "
-        f"modelo={model_key} "
         f"tramite='{matched_item['titulo'] if matched_item else 'No identificado'}' "
         f"rag={USE_RAG} "
         f"followup={using_previous_context}"
@@ -710,55 +640,27 @@ def ask_question(question: Question):
             "ARCO todavia no tiene informacion suficiente para orientar ese tramite "
             "dentro del alcance actual del demo."
         )
-        save_metric({
-            "trace_id": trace_id, "timestamp": datetime.now().isoformat(),
-            "tramite": "No identificado", "user_query": question.query,
-            "respuesta": respuesta, "latency_ms": 0,
-            "input_tokens": 0, "output_tokens": 0, "total_tokens": 0,
-            "fallback": False, "error": None,
-            "model_key": model_key, "model_label": MODELS[model_key]["label"],
-            "model_id": MODELS[model_key]["model"], "using_previous_context": False,
-        })
         return {
             "tramite": "No identificado", "respuesta": respuesta,
             "respuesta_base": None, "costo": None, "duracion": None,
             "canal": None, "presencialidad": None, "requiere_clave_unica": None,
             "fuente": None, "trace_id": trace_id,
-            "model_used": MODELS[model_key]["label"],
+            "model_used": MODEL["label"],
         }
 
-    # Llamada al LLM elegido
+    # Llamada al LLM
     try:
         respuesta_ia, meta = call_llm(
             question.query, matched_item, question.history,
-            model_key, using_previous_context,
+            using_previous_context,
         )
     except Exception as e:
         respuesta_ia = clean_model_text(matched_item["respuesta"])
         meta = {
             "latency_ms": 0, "input_tokens": 0, "output_tokens": 0,
             "total_tokens": 0, "fallback": True, "error": str(e),
-            "model_key": model_key, "model_label": MODELS[model_key]["label"],
-            "model_id": MODELS[model_key]["model"],
+            "model_label": MODEL["label"], "model_id": MODEL["model"],
         }
-
-    save_metric({
-        "trace_id":               trace_id,
-        "timestamp":              datetime.now().isoformat(),
-        "tramite":                matched_item["titulo"],
-        "user_query":             question.query,
-        "respuesta":              respuesta_ia,
-        "latency_ms":             meta["latency_ms"],
-        "input_tokens":           meta["input_tokens"],
-        "output_tokens":          meta["output_tokens"],
-        "total_tokens":           meta["total_tokens"],
-        "fallback":               meta["fallback"],
-        "error":                  meta["error"],
-        "model_key":              meta["model_key"],
-        "model_label":            meta["model_label"],
-        "model_id":               meta["model_id"],
-        "using_previous_context": using_previous_context,
-    })
 
     return {
         "tramite":               matched_item["titulo"],
@@ -771,134 +673,10 @@ def ask_question(question: Question):
         "requiere_clave_unica":  matched_item["requiere_clave_unica"],
         "fuente":                matched_item["fuente"],
         "trace_id":              trace_id,
-        "model_used":            MODELS[model_key]["label"],
+        "model_used":            MODEL["label"],
         "latency_ms":            round(meta["latency_ms"], 0),
         "total_tokens":          meta["total_tokens"],
         "fallback":              meta["fallback"],
     }
 
 
-@app.post("/feedback")
-def submit_feedback(feedback: Feedback):
-    save_feedback_entry({
-        "trace_id":  feedback.trace_id,
-        "model":     feedback.model,
-        "score":     feedback.score,
-        "comment":   feedback.comment,
-        "timestamp": datetime.now().isoformat(),
-    })
-    return {"status": "ok"}
-
-
-# ---------------------------------------------------------------------------
-# Endpoints de métricas y benchmark
-# ---------------------------------------------------------------------------
-
-@app.get("/metrics")
-def get_metrics():
-    metrics   = load_metrics()
-    feedbacks = load_feedbacks()
-    fb_index  = {fb["trace_id"]: fb for fb in feedbacks}
-    for m in metrics:
-        m["feedback"] = fb_index.get(m["trace_id"])
-    return metrics
-
-
-@app.get("/stats")
-def get_stats():
-    metrics = load_metrics()
-    if not metrics:
-        return {"error": "No hay métricas aún"}
-
-    feedbacks = load_feedbacks()
-    positive  = sum(1 for fb in feedbacks if fb["score"] >= 0.8)
-    negative  = sum(1 for fb in feedbacks if fb["score"] <= 0.2)
-
-    latencies    = [m["latency_ms"] for m in metrics if m.get("latency_ms")]
-    total_tokens = sum(m.get("total_tokens", 0) for m in metrics)
-    fallbacks    = sum(1 for m in metrics if m.get("fallback"))
-
-    return {
-        "total_consultas":         len(metrics),
-        "promedio_latencia_ms":    round(sum(latencies) / len(latencies), 2) if latencies else 0,
-        "total_tokens_consumidos": total_tokens,
-        "tasa_fallback":           round(fallbacks / len(metrics) * 100, 2),
-        "feedback_positivos":      positive,
-        "feedback_negativos":      negative,
-        "modelos_activos":         list(MODELS.keys()),
-    }
-
-
-@app.get("/stats/compare")
-def get_stats_compare():
-    metrics   = load_metrics()
-    feedbacks = load_feedbacks()
-    fb_index  = {fb["trace_id"]: fb for fb in feedbacks}
-
-    result = {}
-    for key, cfg in MODELS.items():
-        subset = [m for m in metrics if m.get("model_key") == key]
-        if not subset:
-            result[key] = {
-                "label":                 cfg["label"],
-                "total_consultas":       0,
-                "promedio_latencia_ms":  0,
-                "p95_latencia_ms":       0,
-                "total_tokens":          0,
-                "tokens_por_consulta":   0,
-                "tasa_fallback":         0,
-                "feedback_positivos":    0,
-                "feedback_negativos":    0,
-                "feedback_neutral":      0,
-                "pct_feedback_positivo": 0,
-            }
-            continue
-
-        latencies = sorted(m["latency_ms"] for m in subset if m.get("latency_ms"))
-        p95_idx   = int(len(latencies) * 0.95) - 1 if latencies else 0
-        p95       = latencies[max(p95_idx, 0)] if latencies else 0
-
-        total_tok = sum(m.get("total_tokens", 0) for m in subset)
-        fallbacks = sum(1 for m in subset if m.get("fallback"))
-
-        fb_subset = [fb_index[m["trace_id"]] for m in subset if m["trace_id"] in fb_index]
-        positive  = sum(1 for fb in fb_subset if fb["score"] >= 0.8)
-        negative  = sum(1 for fb in fb_subset if fb["score"] <= 0.2)
-        neutral   = len(fb_subset) - positive - negative
-        pct_pos   = round(positive / len(fb_subset) * 100, 1) if fb_subset else 0
-
-        result[key] = {
-            "label":                 cfg["label"],
-            "total_consultas":       len(subset),
-            "promedio_latencia_ms":  round(sum(latencies) / len(latencies), 1) if latencies else 0,
-            "p95_latencia_ms":       round(p95, 1),
-            "total_tokens":          total_tok,
-            "tokens_por_consulta":   round(total_tok / len(subset), 1),
-            "tasa_fallback":         round(fallbacks / len(subset) * 100, 2),
-            "feedback_positivos":    positive,
-            "feedback_negativos":    negative,
-            "feedback_neutral":      neutral,
-            "pct_feedback_positivo": pct_pos,
-        }
-
-    return result
-
-
-@app.get("/metrics/timeline")
-def get_timeline():
-    metrics = load_metrics()
-    result  = {}
-    for key in MODELS:
-        subset = [m for m in metrics if m.get("model_key") == key]
-        subset.sort(key=lambda x: x.get("timestamp", ""))
-        result[key] = [
-            {
-                "timestamp":  m["timestamp"],
-                "latency_ms": round(m.get("latency_ms", 0), 1),
-                "tokens":     m.get("total_tokens", 0),
-                "fallback":   m.get("fallback", False),
-                "tramite":    m.get("tramite", ""),
-            }
-            for m in subset[-50:]
-        ]
-    return result
