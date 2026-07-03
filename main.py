@@ -1,13 +1,14 @@
 """
 main.py — Backend unificado ARCO
-Puerto: 8000  →  uvicorn main:app --port 8000 --reload
+Ejecutar:  python main.py   (o  uvicorn main:app --port 8000 --reload)
 
-Modelos LLM disponibles:
-  granite → http://127.0.0.1:8001  (Granite-4.0-1B)
-  qwen    → http://127.0.0.1:8002  (Qwen2.5-1.5B)
+Modelo LLM:
+  Se carga automáticamente in-process (llama-cpp-python) desde la carpeta
+  de modelos (por defecto ../modelos). No requiere levantar un servidor
+  LLM aparte: al iniciar main.py el modelo ya queda listo para responder.
 
 Archivos de persistencia:
-  benchmark_metrics.jsonl  — una línea por consulta (campo model_key)
+  benchmark_metrics.jsonl  — una línea por consulta (canal web o whatsapp)
   benchmark_feedback.jsonl — feedback por trace_id
 """
 
@@ -17,13 +18,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field
 from pathlib import Path
-from typing import Optional, Literal
+from typing import Optional
 import json
 import unicodedata
-import requests
 import re
 import time
 import uuid
+import threading
 from datetime import datetime
 import os
 import logging
@@ -43,6 +44,7 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("sentence_transformers").setLevel(logging.WARNING)
 logging.getLogger("chromadb").setLevel(logging.WARNING)
 logging.getLogger("huggingface_hub").setLevel(logging.WARNING)
+logging.getLogger("llama_cpp").setLevel(logging.WARNING)
 
 load_dotenv()
 
@@ -67,32 +69,99 @@ with open(KNOWLEDGE_PATH, "r", encoding="utf-8") as f:
     KNOWLEDGE = json.load(f)
 
 # ---------------------------------------------------------------------------
-# Configuración de modelos
+# Configuración del modelo único (carga automática desde carpeta modelos/)
 # ---------------------------------------------------------------------------
-MODELS = {
-    "granite": {
-        "url":   os.getenv("GRANITE_URL",   "http://127.0.0.1:8001/v1/chat/completions"),
-        "model": os.getenv("GRANITE_MODEL", "granite-4.0-1b-instruct"),
-        "label": "Granite-4.0-1B",
-    },
-    "qwen": {
-        "url":   os.getenv("QWEN_URL",   "http://127.0.0.1:8002/v1/chat/completions"),
-        "model": os.getenv("QWEN_MODEL", "qwen2.5-3b-instruct"),
-        "label": "Qwen2.5-3B",
-    },
-}
+MODEL_DIR             = Path(os.getenv("MODEL_DIR", str(BASE_DIR.parent / "modelos")))
+MODEL_PATH_OVERRIDE   = os.getenv("MODEL_PATH", "")
+# qwen es la preferencia por defecto: granite-4.0-1b usa una arquitectura híbrida
+# Mamba2+atención que llama-cpp-python aún no soporta correctamente (genera texto
+# incoherente). Qwen2.5-3B usa una arquitectura transformer estándar y funciona bien.
+PREFERRED_MODEL_HINT  = os.getenv("MODEL_NAME", "qwen")
+LLM_N_CTX             = int(os.getenv("LLM_N_CTX", "2048"))
+LLM_N_THREADS         = int(os.getenv("LLM_N_THREADS", str(os.cpu_count() or 4)))
+LLM_TEMPERATURE       = float(os.getenv("LLM_TEMPERATURE", "0.1"))
+LLM_MAX_TOKENS        = int(os.getenv("LLM_MAX_TOKENS",  "140"))
 
-LLM_TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", "0.1"))
-LLM_MAX_TOKENS  = int(os.getenv("LLM_MAX_TOKENS",  "140"))
+# Permite a los tests / pipelines saltarse la carga del modelo (lento y pesado).
+SKIP_MODEL_LOAD = os.getenv("ARCO_SKIP_MODEL_LOAD", "false").lower() == "true"
+
+
+def discover_model_path() -> Path:
+    if MODEL_PATH_OVERRIDE:
+        p = Path(MODEL_PATH_OVERRIDE)
+        if not p.exists():
+            raise FileNotFoundError(f"MODEL_PATH configurado pero no existe: {p}")
+        return p
+
+    if not MODEL_DIR.exists():
+        raise FileNotFoundError(
+            f"No se encontró la carpeta de modelos '{MODEL_DIR}'. "
+            f"Configura MODEL_DIR o MODEL_PATH en el archivo .env."
+        )
+
+    candidates = sorted(MODEL_DIR.glob("**/*.gguf"))
+    if not candidates:
+        raise FileNotFoundError(f"No se encontró ningún archivo .gguf dentro de '{MODEL_DIR}'.")
+
+    preferred = [c for c in candidates if PREFERRED_MODEL_HINT.lower() in str(c).lower()]
+    return preferred[0] if preferred else candidates[0]
+
+
+def infer_model_label(model_path: Path) -> str:
+    name = model_path.stem.lower()
+    if "granite" in name:
+        return "Granite-4.0-1B"
+    if "qwen" in name:
+        return "Qwen2.5-3B"
+    return model_path.stem
+
+
+_llm_lock: threading.Lock = threading.Lock()
+LLM = None
+MODEL_PATH = None
+MODEL_LABEL = os.getenv("MODEL_LABEL", "")
+
+if not SKIP_MODEL_LOAD:
+    from llama_cpp import Llama
+
+    MODEL_PATH  = discover_model_path()
+    MODEL_LABEL = MODEL_LABEL or infer_model_label(MODEL_PATH)
+
+    logger.info(f"Cargando modelo LLM desde '{MODEL_PATH}' ...")
+    _t0 = time.time()
+    LLM = Llama(
+        model_path=str(MODEL_PATH),
+        n_ctx=LLM_N_CTX,
+        n_threads=LLM_N_THREADS,
+        verbose=False,
+    )
+    logger.info(f"Modelo '{MODEL_LABEL}' cargado en {time.time() - _t0:.1f}s")
+else:
+    MODEL_LABEL = MODEL_LABEL or "Qwen2.5-3B"
+    logger.info("Carga del modelo LLM omitida (ARCO_SKIP_MODEL_LOAD=true)")
 
 # ---------------------------------------------------------------------------
 # Configuración WhatsApp Cloud API
 # ---------------------------------------------------------------------------
-WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN", "")
-WHATSAPP_PHONE_NUMBER_ID = os.getenv("WHATSAPP_PHONE_NUMBER_ID", "")
-WHATSAPP_VERIFY_TOKEN = os.getenv("WHATSAPP_VERIFY_TOKEN", "arco_tavi_verify_token")
-WHATSAPP_GRAPH_VERSION = os.getenv("WHATSAPP_GRAPH_VERSION", "v22.0")
-WHATSAPP_DEFAULT_MODEL = os.getenv("WHATSAPP_DEFAULT_MODEL", "qwen")
+import requests
+
+WHATSAPP_TOKEN            = os.getenv("WHATSAPP_TOKEN", "")
+WHATSAPP_PHONE_NUMBER_ID  = os.getenv("WHATSAPP_PHONE_NUMBER_ID", "")
+WHATSAPP_VERIFY_TOKEN     = os.getenv("WHATSAPP_VERIFY_TOKEN", "arco_tavi_verify_token")
+WHATSAPP_GRAPH_VERSION    = os.getenv("WHATSAPP_GRAPH_VERSION", "v22.0")
+
+# Mapeo "Nombre:numero,Nombre:numero" -> para mostrar consultas por integrante en el dashboard.
+WHATSAPP_TEAM: dict[str, str] = {}
+for _pair in os.getenv("WHATSAPP_TEAM", "").split(","):
+    _pair = _pair.strip()
+    if not _pair or ":" not in _pair:
+        continue
+    _name, _phone = _pair.split(":", 1)
+    WHATSAPP_TEAM[_phone.strip()] = _name.strip()
+
+
+def resolve_integrante(phone_number: str) -> str:
+    return WHATSAPP_TEAM.get(phone_number, phone_number)
 
 
 # Cargar prompts al iniciar
@@ -164,7 +233,6 @@ class ContextData(BaseModel):
 
 class Question(BaseModel):
     query:    str
-    model:    Literal["granite", "qwen"] = "granite"
     history:  list[ChatMessage] = Field(default_factory=list)
     context:  Optional[ContextData] = None
     trace_id: Optional[str] = None
@@ -172,7 +240,7 @@ class Question(BaseModel):
 
 class Feedback(BaseModel):
     trace_id: str
-    model:    str
+    model:    Optional[str] = None
     score:    float    # 1.0 positivo · 0.5 neutral · 0.0 negativo
     comment:  Optional[str] = None
 
@@ -258,20 +326,42 @@ def load_feedbacks() -> list[dict]:
         return [json.loads(line) for line in f if line.strip()]
 
 
+def base_metric_entry(
+    trace_id: str, tramite: str, user_query: str, respuesta: str,
+    channel: str, integrante: Optional[str], **extra,
+) -> dict:
+    entry = {
+        "trace_id":               trace_id,
+        "timestamp":              datetime.now().isoformat(),
+        "tramite":                tramite,
+        "user_query":             user_query,
+        "respuesta":              respuesta,
+        "channel":                channel,
+        "integrante":             integrante,
+        "model_label":            MODEL_LABEL,
+        "latency_ms":             0,
+        "ttft_ms":                None,
+        "input_tokens":           0,
+        "output_tokens":          0,
+        "total_tokens":           0,
+        "fallback":               False,
+        "error":                  None,
+        "using_previous_context": False,
+    }
+    entry.update(extra)
+    return entry
+
+
 # ---------------------------------------------------------------------------
-# Llamada al LLM
+# Llamada al LLM (in-process, con streaming para medir time-to-first-token)
 # ---------------------------------------------------------------------------
 
 def call_llm(
     user_query: str,
     item: dict,
     history: list[ChatMessage],
-    model_key: str,
     using_previous_context: bool = False,
 ) -> tuple[str, dict]:
-    cfg = MODELS[model_key]
-
-    # Cargar prompt desde prompts.json
     system_prompt = SYSTEM_PROMPT
 
     history_text = build_history_text(history)
@@ -312,51 +402,199 @@ redacta una respuesta breve de orientacion para el usuario.
         {"role": "user",   "content": user_prompt},
     ]
 
-    input_tokens = estimate_tokens(json.dumps(messages, ensure_ascii=False))
-    payload = {
-        "model":       cfg["model"],
-        "messages":    messages,
-        "temperature": LLM_TEMPERATURE,
-        "max_tokens":  LLM_MAX_TOKENS,
-    }
-
     start    = time.time()
+    ttft_ms  = None
     fallback = False
     error    = None
 
-    try:
-        resp = requests.post(cfg["url"], json=payload, timeout=120)
-        resp.raise_for_status()
-        data     = resp.json()
-        raw_text = data["choices"][0]["message"]["content"].strip()
-        respuesta = clean_model_text(raw_text)
-
-        usage = data.get("usage", {})
-        if usage:
-            input_tokens  = usage.get("prompt_tokens",     input_tokens)
-            output_tokens = usage.get("completion_tokens", 0)
-        else:
-            output_tokens = estimate_tokens(respuesta)
-
-    except Exception as e:
+    if LLM is None:
         respuesta     = clean_model_text(item["respuesta"])
         input_tokens  = 0
         output_tokens = 0
         fallback      = True
-        error         = str(e)
+        error         = "Modelo LLM no cargado"
+    else:
+        try:
+            with _llm_lock:
+                stream = LLM.create_chat_completion(
+                    messages=messages,
+                    temperature=LLM_TEMPERATURE,
+                    max_tokens=LLM_MAX_TOKENS,
+                    stream=True,
+                )
+                pieces = []
+                for chunk in stream:
+                    delta = chunk["choices"][0].get("delta", {})
+                    piece = delta.get("content")
+                    if piece:
+                        if ttft_ms is None:
+                            ttft_ms = (time.time() - start) * 1000
+                        pieces.append(piece)
+
+                raw_text = "".join(pieces).strip()
+                respuesta = clean_model_text(raw_text)
+
+                if ttft_ms is None:
+                    ttft_ms = (time.time() - start) * 1000
+
+                prompt_text   = system_prompt + "\n" + user_prompt
+                input_tokens  = len(LLM.tokenize(prompt_text.encode("utf-8")))
+                output_tokens = len(LLM.tokenize(raw_text.encode("utf-8"), add_bos=False)) if raw_text else 0
+
+        except Exception as e:
+            respuesta     = clean_model_text(item["respuesta"])
+            input_tokens  = 0
+            output_tokens = 0
+            fallback      = True
+            error         = str(e)
+            ttft_ms       = None
 
     elapsed_ms = (time.time() - start) * 1000
 
     return respuesta, {
         "latency_ms":    elapsed_ms,
+        "ttft_ms":       ttft_ms,
         "input_tokens":  input_tokens,
         "output_tokens": output_tokens,
         "total_tokens":  input_tokens + output_tokens,
         "fallback":      fallback,
         "error":         error,
-        "model_key":     model_key,
-        "model_label":   cfg["label"],
-        "model_id":      cfg["model"],
+    }
+
+
+# ---------------------------------------------------------------------------
+# Núcleo de la lógica de /ask (compartido entre web y WhatsApp)
+# ---------------------------------------------------------------------------
+
+def ask_core(
+    *,
+    query: str,
+    history: list[ChatMessage],
+    context: Optional[ContextData],
+    trace_id: Optional[str],
+    channel: str,
+    integrante: Optional[str],
+) -> dict:
+    trace_id     = trace_id or str(uuid.uuid4())
+    query_norm   = normalize_text(query)
+
+    matched_item           = None
+    using_previous_context = False
+
+    # RAG (si está activo)
+    if USE_RAG:
+        rag_results = search_rag(query)
+        if rag_results:
+            mejor = rag_results[0]
+            matched_item = {
+                "titulo":               mejor["titulo"] or "Resultado RAG",
+                "respuesta":            mejor["texto"],
+                "costo":                mejor.get("costo"),
+                "duracion":             mejor.get("duracion"),
+                "canal":                mejor.get("canal", "ver fuente oficial"),
+                "presencialidad":       mejor.get("presencialidad", "ver fuente oficial"),
+                "requiere_clave_unica": mejor.get("requiere_clave_unica", "ver fuente oficial"),
+                "fuente":               mejor["fuente"] or "",
+            }
+
+    # Búsqueda por keywords en knowledge.json
+    if not matched_item:
+        for item in KNOWLEDGE:
+            for kw in item["keywords"]:
+                if normalize_text(kw) in query_norm:
+                    matched_item = item
+                    break
+            if matched_item:
+                break
+
+    # Caso especial: licencia de conducir
+    if "licencia de conducir" in query_norm or "renovar licencia" in query_norm:
+        respuesta = (
+            "La renovacion de licencia de conducir no corresponde al Registro Civil. "
+            "ARCO esta enfocado en tramites del Registro Civil y su orientacion."
+        )
+        save_metric(base_metric_entry(
+            trace_id, "Fuera del alcance", query, respuesta, channel, integrante,
+        ))
+        return {
+            "tramite": "Fuera del alcance de ARCO", "respuesta": respuesta,
+            "respuesta_base": None, "costo": None, "duracion": None,
+            "canal": None, "presencialidad": None, "requiere_clave_unica": None,
+            "fuente": "https://www.chileatiende.gob.cl/fichas/20592-licencias-de-conducir",
+            "trace_id": trace_id, "model_used": MODEL_LABEL,
+        }
+
+    # Seguimiento de contexto previo
+    if not matched_item and context and is_followup_query(query):
+        ctx_item = context_to_item(context)
+        if ctx_item:
+            matched_item           = ctx_item
+            using_previous_context = True
+
+    logger.info(
+        f"query='{query}' "
+        f"canal={channel} "
+        f"integrante={integrante or '-'} "
+        f"tramite='{matched_item['titulo'] if matched_item else 'No identificado'}' "
+        f"rag={USE_RAG} "
+        f"followup={using_previous_context}"
+    )
+
+    # Trámite no identificado
+    if not matched_item:
+        respuesta = (
+            "ARCO todavia no tiene informacion suficiente para orientar ese tramite "
+            "dentro del alcance actual del demo."
+        )
+        save_metric(base_metric_entry(
+            trace_id, "No identificado", query, respuesta, channel, integrante,
+        ))
+        return {
+            "tramite": "No identificado", "respuesta": respuesta,
+            "respuesta_base": None, "costo": None, "duracion": None,
+            "canal": None, "presencialidad": None, "requiere_clave_unica": None,
+            "fuente": None, "trace_id": trace_id,
+            "model_used": MODEL_LABEL,
+        }
+
+    # Llamada al LLM
+    try:
+        respuesta_ia, meta = call_llm(query, matched_item, history, using_previous_context)
+    except Exception as e:
+        respuesta_ia = clean_model_text(matched_item["respuesta"])
+        meta = {
+            "latency_ms": 0, "ttft_ms": None, "input_tokens": 0, "output_tokens": 0,
+            "total_tokens": 0, "fallback": True, "error": str(e),
+        }
+
+    save_metric(base_metric_entry(
+        trace_id, matched_item["titulo"], query, respuesta_ia, channel, integrante,
+        latency_ms=meta.get("latency_ms", 0),
+        ttft_ms=meta.get("ttft_ms"),
+        input_tokens=meta.get("input_tokens", 0),
+        output_tokens=meta.get("output_tokens", 0),
+        total_tokens=meta.get("total_tokens", 0),
+        fallback=meta.get("fallback", False),
+        error=meta.get("error"),
+        using_previous_context=using_previous_context,
+    ))
+
+    return {
+        "tramite":               matched_item["titulo"],
+        "respuesta":             respuesta_ia,
+        "respuesta_base":        matched_item["respuesta"],
+        "costo":                 matched_item.get("costo"),
+        "duracion":              matched_item.get("duracion"),
+        "canal":                 matched_item["canal"],
+        "presencialidad":        matched_item["presencialidad"],
+        "requiere_clave_unica":  matched_item["requiere_clave_unica"],
+        "fuente":                matched_item["fuente"],
+        "trace_id":              trace_id,
+        "model_used":            MODEL_LABEL,
+        "latency_ms":            round(meta.get("latency_ms", 0), 0),
+        "ttft_ms":               round(meta["ttft_ms"], 0) if meta.get("ttft_ms") else None,
+        "total_tokens":          meta.get("total_tokens", 0),
+        "fallback":              meta.get("fallback", False),
     }
 
 
@@ -417,7 +655,6 @@ def build_whatsapp_reply(arco_response: dict) -> str:
     costo = arco_response.get("costo")
     duracion = arco_response.get("duracion")
     fuente = arco_response.get("fuente")
-    modelo = arco_response.get("model_used")
 
     partes = [
         "ARCO - Orientación de trámite",
@@ -434,9 +671,6 @@ def build_whatsapp_reply(arco_response: dict) -> str:
 
     if fuente:
         partes.append(f"Fuente: {fuente}")
-
-    if modelo:
-        partes.append(f"Modelo usado: {modelo}")
 
     partes.append("\nEsta orientación es informativa. Verifica siempre en canales oficiales.")
 
@@ -520,8 +754,9 @@ def receive_whatsapp_message(payload: dict):
         return {"status": "ignored", "reason": "payload sin mensaje de texto"}
 
     from_number, user_text, should_call_arco = extracted
+    integrante = resolve_integrante(from_number)
 
-    logger.info("Mensaje WhatsApp desde %s: %s", from_number, user_text)
+    logger.info("Mensaje WhatsApp desde %s (%s): %s", from_number, integrante, user_text)
 
     if not should_call_arco:
         sent = send_whatsapp_message(from_number, user_text)
@@ -532,17 +767,14 @@ def receive_whatsapp_message(payload: dict):
             "type": "non_text",
         }
 
-    model_key = WHATSAPP_DEFAULT_MODEL if WHATSAPP_DEFAULT_MODEL in MODELS else "qwen"
-
-    question = Question(
+    arco_response = ask_core(
         query=user_text,
-        model=model_key,
         history=[],
         context=None,
         trace_id=f"whatsapp-{uuid.uuid4()}",
+        channel="whatsapp",
+        integrante=integrante,
     )
-
-    arco_response = ask_question(question)
     whatsapp_text = build_whatsapp_reply(arco_response)
     sent = send_whatsapp_message(from_number, whatsapp_text)
 
@@ -550,7 +782,7 @@ def receive_whatsapp_message(payload: dict):
         "status": "processed",
         "sent": sent,
         "from": from_number,
-        "model": model_key,
+        "integrante": integrante,
         "tramite": arco_response.get("tramite"),
         "trace_id": arco_response.get("trace_id"),
     }
@@ -594,7 +826,7 @@ def privacy_policy():
         <h2>Registro de métricas</h2>
         <p>
             El sistema puede almacenar métricas técnicas como fecha de consulta, trámite detectado,
-            modelo utilizado, latencia, cantidad de tokens y si hubo fallback. Estas métricas se usan
+            canal utilizado, latencia, cantidad de tokens y si hubo fallback. Estas métricas se usan
             solo para evaluación académica y mejora del prototipo.
         </p>
 
@@ -617,172 +849,39 @@ def privacy_policy():
 def root():
     return {
         "message": "ARCO backend unificado",
-        "modelos": {k: v["label"] for k, v in MODELS.items()},
+        "modelo": {
+            "label": MODEL_LABEL,
+            "path": str(MODEL_PATH) if MODEL_PATH else None,
+            "cargado": LLM is not None,
+        },
     }
 
 
 @app.get("/models")
 def get_models():
     return {
-        k: {"label": v["label"], "url": v["url"], "model_id": v["model"]}
-        for k, v in MODELS.items()
+        "label":   MODEL_LABEL,
+        "path":    str(MODEL_PATH) if MODEL_PATH else None,
+        "cargado": LLM is not None,
     }
 
 
 @app.post("/ask")
 def ask_question(question: Question):
-    trace_id  = question.trace_id or str(uuid.uuid4())
-    query     = normalize_text(question.query)
-    model_key = question.model
-
-    matched_item           = None
-    using_previous_context = False
-
-    # RAG (si está activo)
-    if USE_RAG:
-        rag_results = search_rag(question.query)
-        if rag_results:
-            mejor = rag_results[0]
-            matched_item = {
-                
-                "titulo":               mejor["titulo"] or "Resultado RAG",
-                "respuesta":            mejor["texto"],
-                "costo":                mejor.get("costo"),
-                "duracion":             mejor.get("duracion"),
-                "canal":                mejor.get("canal", "ver fuente oficial"),
-                "presencialidad":       mejor.get("presencialidad", "ver fuente oficial"),
-                "requiere_clave_unica": mejor.get("requiere_clave_unica", "ver fuente oficial"),
-                "fuente":               mejor["fuente"] or "",
-            }
-            
-
-    # Búsqueda por keywords en knowledge.json
-    if not matched_item:
-        for item in KNOWLEDGE:
-            for kw in item["keywords"]:
-                if normalize_text(kw) in query:
-                    matched_item = item
-                    break
-            if matched_item:
-                break
-
-    # Caso especial: licencia de conducir
-    if "licencia de conducir" in query or "renovar licencia" in query:
-        respuesta = (
-            "La renovacion de licencia de conducir no corresponde al Registro Civil. "
-            "ARCO esta enfocado en tramites del Registro Civil y su orientacion."
-        )
-        save_metric({
-            "trace_id": trace_id, "timestamp": datetime.now().isoformat(),
-            "tramite": "Fuera del alcance", "user_query": question.query,
-            "respuesta": respuesta, "latency_ms": 0,
-            "input_tokens": 0, "output_tokens": 0, "total_tokens": 0,
-            "fallback": False, "error": None,
-            "model_key": model_key, "model_label": MODELS[model_key]["label"],
-            "model_id": MODELS[model_key]["model"], "using_previous_context": False,
-        })
-        return {
-            "tramite": "Fuera del alcance de ARCO", "respuesta": respuesta,
-            "respuesta_base": None, "costo": None, "duracion": None,
-            "canal": None, "presencialidad": None, "requiere_clave_unica": None,
-            "fuente": "https://www.chileatiende.gob.cl/fichas/20592-licencias-de-conducir",
-            "trace_id": trace_id, "model_used": MODELS[model_key]["label"],
-        }
-
-    # Seguimiento de contexto previo
-    if not matched_item and question.context and is_followup_query(question.query):
-        ctx_item = context_to_item(question.context)
-        if ctx_item:
-            matched_item           = ctx_item
-            using_previous_context = True
-
-    logger.info(
-        f"query='{question.query}' "
-        f"modelo={model_key} "
-        f"tramite='{matched_item['titulo'] if matched_item else 'No identificado'}' "
-        f"rag={USE_RAG} "
-        f"followup={using_previous_context}"
+    return ask_core(
+        query=question.query,
+        history=question.history,
+        context=question.context,
+        trace_id=question.trace_id,
+        channel="web",
+        integrante=None,
     )
-
-    # Trámite no identificado
-    if not matched_item:
-        respuesta = (
-            "ARCO todavia no tiene informacion suficiente para orientar ese tramite "
-            "dentro del alcance actual del demo."
-        )
-        save_metric({
-            "trace_id": trace_id, "timestamp": datetime.now().isoformat(),
-            "tramite": "No identificado", "user_query": question.query,
-            "respuesta": respuesta, "latency_ms": 0,
-            "input_tokens": 0, "output_tokens": 0, "total_tokens": 0,
-            "fallback": False, "error": None,
-            "model_key": model_key, "model_label": MODELS[model_key]["label"],
-            "model_id": MODELS[model_key]["model"], "using_previous_context": False,
-        })
-        return {
-            "tramite": "No identificado", "respuesta": respuesta,
-            "respuesta_base": None, "costo": None, "duracion": None,
-            "canal": None, "presencialidad": None, "requiere_clave_unica": None,
-            "fuente": None, "trace_id": trace_id,
-            "model_used": MODELS[model_key]["label"],
-        }
-
-    # Llamada al LLM elegido
-    try:
-        respuesta_ia, meta = call_llm(
-            question.query, matched_item, question.history,
-            model_key, using_previous_context,
-        )
-    except Exception as e:
-        respuesta_ia = clean_model_text(matched_item["respuesta"])
-        meta = {
-            "latency_ms": 0, "input_tokens": 0, "output_tokens": 0,
-            "total_tokens": 0, "fallback": True, "error": str(e),
-            "model_key": model_key, "model_label": MODELS[model_key]["label"],
-            "model_id": MODELS[model_key]["model"],
-        }
-
-    save_metric({
-        "trace_id":               trace_id,
-        "timestamp":              datetime.now().isoformat(),
-        "tramite":                matched_item["titulo"],
-        "user_query":             question.query,
-        "respuesta":              respuesta_ia,
-        "latency_ms":             meta["latency_ms"],
-        "input_tokens":           meta["input_tokens"],
-        "output_tokens":          meta["output_tokens"],
-        "total_tokens":           meta["total_tokens"],
-        "fallback":               meta["fallback"],
-        "error":                  meta["error"],
-        "model_key":              meta["model_key"],
-        "model_label":            meta["model_label"],
-        "model_id":               meta["model_id"],
-        "using_previous_context": using_previous_context,
-    })
-
-    return {
-        "tramite":               matched_item["titulo"],
-        "respuesta":             respuesta_ia,
-        "respuesta_base":        matched_item["respuesta"],
-        "costo":                 matched_item.get("costo"),
-        "duracion":              matched_item.get("duracion"),
-        "canal":                 matched_item["canal"],
-        "presencialidad":        matched_item["presencialidad"],
-        "requiere_clave_unica":  matched_item["requiere_clave_unica"],
-        "fuente":                matched_item["fuente"],
-        "trace_id":              trace_id,
-        "model_used":            MODELS[model_key]["label"],
-        "latency_ms":            round(meta["latency_ms"], 0),
-        "total_tokens":          meta["total_tokens"],
-        "fallback":              meta["fallback"],
-    }
 
 
 @app.post("/feedback")
 def submit_feedback(feedback: Feedback):
     save_feedback_entry({
         "trace_id":  feedback.trace_id,
-        "model":     feedback.model,
         "score":     feedback.score,
         "comment":   feedback.comment,
         "timestamp": datetime.now().isoformat(),
@@ -791,7 +890,7 @@ def submit_feedback(feedback: Feedback):
 
 
 # ---------------------------------------------------------------------------
-# Endpoints de métricas y benchmark
+# Endpoints de métricas
 # ---------------------------------------------------------------------------
 
 @app.get("/metrics")
@@ -804,6 +903,50 @@ def get_metrics():
     return metrics
 
 
+def _percentile95(values: list[float]) -> float:
+    if not values:
+        return 0
+    s = sorted(values)
+    idx = max(int(len(s) * 0.95) - 1, 0)
+    return s[idx]
+
+
+def _summarize(subset: list[dict], fb_index: dict) -> dict:
+    if not subset:
+        return {
+            "total_consultas": 0, "promedio_latencia_ms": 0, "p95_latencia_ms": 0,
+            "promedio_ttft_ms": 0, "p95_ttft_ms": 0, "total_tokens": 0,
+            "tokens_por_consulta": 0, "tasa_fallback": 0,
+            "feedback_positivos": 0, "feedback_negativos": 0, "feedback_neutral": 0,
+            "pct_feedback_positivo": 0,
+        }
+
+    latencies = [m["latency_ms"] for m in subset if m.get("latency_ms")]
+    ttfts     = [m["ttft_ms"] for m in subset if m.get("ttft_ms")]
+    total_tok = sum(m.get("total_tokens", 0) for m in subset)
+    fallbacks = sum(1 for m in subset if m.get("fallback"))
+
+    fb_subset = [fb_index[m["trace_id"]] for m in subset if m["trace_id"] in fb_index]
+    positive  = sum(1 for fb in fb_subset if fb["score"] >= 0.8)
+    negative  = sum(1 for fb in fb_subset if fb["score"] <= 0.2)
+    neutral   = len(fb_subset) - positive - negative
+
+    return {
+        "total_consultas":       len(subset),
+        "promedio_latencia_ms":  round(sum(latencies) / len(latencies), 1) if latencies else 0,
+        "p95_latencia_ms":       round(_percentile95(latencies), 1),
+        "promedio_ttft_ms":      round(sum(ttfts) / len(ttfts), 1) if ttfts else 0,
+        "p95_ttft_ms":           round(_percentile95(ttfts), 1),
+        "total_tokens":          total_tok,
+        "tokens_por_consulta":   round(total_tok / len(subset), 1),
+        "tasa_fallback":         round(fallbacks / len(subset) * 100, 2),
+        "feedback_positivos":    positive,
+        "feedback_negativos":    negative,
+        "feedback_neutral":      neutral,
+        "pct_feedback_positivo": round(positive / len(fb_subset) * 100, 1) if fb_subset else 0,
+    }
+
+
 @app.get("/stats")
 def get_stats():
     metrics = load_metrics()
@@ -811,94 +954,58 @@ def get_stats():
         return {"error": "No hay métricas aún"}
 
     feedbacks = load_feedbacks()
-    positive  = sum(1 for fb in feedbacks if fb["score"] >= 0.8)
-    negative  = sum(1 for fb in feedbacks if fb["score"] <= 0.2)
+    fb_index  = {fb["trace_id"]: fb for fb in feedbacks}
 
-    latencies    = [m["latency_ms"] for m in metrics if m.get("latency_ms")]
-    total_tokens = sum(m.get("total_tokens", 0) for m in metrics)
-    fallbacks    = sum(1 for m in metrics if m.get("fallback"))
-
-    return {
-        "total_consultas":         len(metrics),
-        "promedio_latencia_ms":    round(sum(latencies) / len(latencies), 2) if latencies else 0,
-        "total_tokens_consumidos": total_tokens,
-        "tasa_fallback":           round(fallbacks / len(metrics) * 100, 2),
-        "feedback_positivos":      positive,
-        "feedback_negativos":      negative,
-        "modelos_activos":         list(MODELS.keys()),
-    }
+    resumen = _summarize(metrics, fb_index)
+    resumen["modelo_activo"]      = MODEL_LABEL
+    resumen["consultas_web"]      = sum(1 for m in metrics if m.get("channel") == "web")
+    resumen["consultas_whatsapp"] = sum(1 for m in metrics if m.get("channel") == "whatsapp")
+    return resumen
 
 
-@app.get("/stats/compare")
-def get_stats_compare():
-    metrics   = load_metrics()
+
+@app.get("/stats/whatsapp")
+def get_stats_whatsapp():
+    metrics   = [m for m in load_metrics() if m.get("channel") == "whatsapp"]
     feedbacks = load_feedbacks()
     fb_index  = {fb["trace_id"]: fb for fb in feedbacks}
 
+    por_integrante: dict[str, list[dict]] = {}
+    for m in metrics:
+        nombre = m.get("integrante") or "Desconocido"
+        por_integrante.setdefault(nombre, []).append(m)
+
     result = {}
-    for key, cfg in MODELS.items():
-        subset = [m for m in metrics if m.get("model_key") == key]
-        if not subset:
-            result[key] = {
-                "label":                 cfg["label"],
-                "total_consultas":       0,
-                "promedio_latencia_ms":  0,
-                "p95_latencia_ms":       0,
-                "total_tokens":          0,
-                "tokens_por_consulta":   0,
-                "tasa_fallback":         0,
-                "feedback_positivos":    0,
-                "feedback_negativos":    0,
-                "feedback_neutral":      0,
-                "pct_feedback_positivo": 0,
-            }
-            continue
-
-        latencies = sorted(m["latency_ms"] for m in subset if m.get("latency_ms"))
-        p95_idx   = int(len(latencies) * 0.95) - 1 if latencies else 0
-        p95       = latencies[max(p95_idx, 0)] if latencies else 0
-
-        total_tok = sum(m.get("total_tokens", 0) for m in subset)
-        fallbacks = sum(1 for m in subset if m.get("fallback"))
-
-        fb_subset = [fb_index[m["trace_id"]] for m in subset if m["trace_id"] in fb_index]
-        positive  = sum(1 for fb in fb_subset if fb["score"] >= 0.8)
-        negative  = sum(1 for fb in fb_subset if fb["score"] <= 0.2)
-        neutral   = len(fb_subset) - positive - negative
-        pct_pos   = round(positive / len(fb_subset) * 100, 1) if fb_subset else 0
-
-        result[key] = {
-            "label":                 cfg["label"],
-            "total_consultas":       len(subset),
-            "promedio_latencia_ms":  round(sum(latencies) / len(latencies), 1) if latencies else 0,
-            "p95_latencia_ms":       round(p95, 1),
-            "total_tokens":          total_tok,
-            "tokens_por_consulta":   round(total_tok / len(subset), 1),
-            "tasa_fallback":         round(fallbacks / len(subset) * 100, 2),
-            "feedback_positivos":    positive,
-            "feedback_negativos":    negative,
-            "feedback_neutral":      neutral,
-            "pct_feedback_positivo": pct_pos,
-        }
-
+    for nombre, subset in por_integrante.items():
+        s = _summarize(subset, fb_index)
+        s["ultima_consulta"] = max(m["timestamp"] for m in subset)
+        result[nombre] = s
     return result
 
 
 @app.get("/metrics/timeline")
-def get_timeline():
-    metrics = load_metrics()
-    result  = {}
-    for key in MODELS:
-        subset = [m for m in metrics if m.get("model_key") == key]
-        subset.sort(key=lambda x: x.get("timestamp", ""))
-        result[key] = [
-            {
-                "timestamp":  m["timestamp"],
-                "latency_ms": round(m.get("latency_ms", 0), 1),
-                "tokens":     m.get("total_tokens", 0),
-                "fallback":   m.get("fallback", False),
-                "tramite":    m.get("tramite", ""),
-            }
-            for m in subset[-50:]
-        ]
-    return result
+def get_timeline(limit: int = 50):
+    metrics = sorted(load_metrics(), key=lambda x: x.get("timestamp", ""))
+    subset  = metrics[-limit:]
+    return [
+        {
+            "timestamp":  m["timestamp"],
+            "latency_ms": round(m.get("latency_ms", 0), 1),
+            "ttft_ms":    round(m["ttft_ms"], 1) if m.get("ttft_ms") else None,
+            "tokens":     m.get("total_tokens", 0),
+            "fallback":   m.get("fallback", False),
+            "tramite":    m.get("tramite", ""),
+            "channel":    m.get("channel", "web"),
+            "integrante": m.get("integrante"),
+        }
+        for m in subset
+    ]
+
+
+# ---------------------------------------------------------------------------
+# Ejecución directa: `python main.py` levanta el backend y el modelo se
+# carga automáticamente al importar este módulo (ver bloque de carga arriba).
+# ---------------------------------------------------------------------------
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
