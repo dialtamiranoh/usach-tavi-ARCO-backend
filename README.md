@@ -247,9 +247,10 @@ python main.py
 | POST | `/webhook/whatsapp` | Recibe mensajes de WhatsApp (canal whatsapp) |
 | POST | `/feedback` | Registra feedback de una respuesta |
 | GET | `/metrics` | Todas las métricas con feedback |
-| GET | `/stats` | Resumen global (incluye TTFT y conteo web/whatsapp) |
+| GET | `/stats` | Resumen global (TTFT, throughput, memoria, accuracy de enrutamiento, conteo web/whatsapp) |
 | GET | `/stats/whatsapp` | Consultas por integrante del equipo (WhatsApp) |
 | GET | `/metrics/timeline` | Latencia y TTFT en el tiempo |
+| GET | `/eval/latest` | Último reporte de `eval/evaluador.py` (accuracy de enrutamiento de trámites) |
 
 ### Ejemplo POST /ask
 

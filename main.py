@@ -29,6 +29,7 @@ import threading
 from datetime import datetime
 import os
 import logging
+import psutil
 
 logging.basicConfig(
     level=logging.INFO,
@@ -65,6 +66,7 @@ BASE_DIR       = Path(__file__).resolve().parent
 KNOWLEDGE_PATH = BASE_DIR / "knowledge.json"
 METRICS_PATH   = BASE_DIR / "benchmark_metrics.jsonl"
 FEEDBACK_PATH  = BASE_DIR / "benchmark_feedback.jsonl"
+EVAL_REPORT_PATH = BASE_DIR / "eval" / "reporte_latest.json"
 
 with open(KNOWLEDGE_PATH, "r", encoding="utf-8") as f:
     KNOWLEDGE = json.load(f)
@@ -341,6 +343,7 @@ def base_metric_entry(
         "integrante":             integrante,
         "telefono":               telefono,
         "model_label":            MODEL_LABEL,
+        "memoria_mb":             get_memory_usage_mb(),
         "latency_ms":             0,
         "ttft_ms":                None,
         "input_tokens":           0,
@@ -924,7 +927,7 @@ def _summarize(subset: list[dict], fb_index: dict) -> dict:
             "total_consultas": 0, "promedio_latencia_ms": 0, "p95_latencia_ms": 0,
             "promedio_ttft_ms": 0, "p95_ttft_ms": 0, "total_tokens": 0,
             "tokens_por_consulta": 0, "tokens_por_segundo": 0, "tasa_fallback": 0,
-            "tasa_no_identificado": 0,
+            "tasa_no_identificado": 0, "consultas_por_hora": 0,
             "feedback_positivos": 0, "feedback_negativos": 0, "feedback_neutral": 0,
             "pct_feedback_positivo": 0,
         }
@@ -943,6 +946,17 @@ def _summarize(subset: list[dict], fb_index: dict) -> dict:
         if gen_ms > 0 and out_tok > 0:
             throughputs.append(out_tok / (gen_ms / 1000))
 
+    # throughput del sistema: consultas/hora promedio a lo largo del rango de timestamps observado.
+    timestamps = sorted(m["timestamp"] for m in subset if m.get("timestamp"))
+    if len(timestamps) >= 2:
+        span_hours = max(
+            (datetime.fromisoformat(timestamps[-1]) - datetime.fromisoformat(timestamps[0])).total_seconds() / 3600,
+            1 / 60,
+        )
+        consultas_por_hora = round(len(subset) / span_hours, 2)
+    else:
+        consultas_por_hora = 0
+
     fb_subset = [fb_index[m["trace_id"]] for m in subset if m["trace_id"] in fb_index]
     positive  = sum(1 for fb in fb_subset if fb["score"] >= 0.8)
     negative  = sum(1 for fb in fb_subset if fb["score"] <= 0.2)
@@ -959,11 +973,23 @@ def _summarize(subset: list[dict], fb_index: dict) -> dict:
         "tokens_por_segundo":    round(sum(throughputs) / len(throughputs), 1) if throughputs else 0,
         "tasa_fallback":         round(fallbacks / len(subset) * 100, 2),
         "tasa_no_identificado":  round(no_match / len(subset) * 100, 2),
+        "consultas_por_hora":    consultas_por_hora,
         "feedback_positivos":    positive,
         "feedback_negativos":    negative,
         "feedback_neutral":      neutral,
         "pct_feedback_positivo": round(positive / len(fb_subset) * 100, 1) if fb_subset else 0,
     }
+
+
+def get_memory_usage_mb() -> float:
+    return round(psutil.Process(os.getpid()).memory_info().rss / (1024 * 1024), 1)
+
+
+def load_eval_report() -> Optional[dict]:
+    if not EVAL_REPORT_PATH.exists():
+        return None
+    with open(EVAL_REPORT_PATH, "r", encoding="utf-8") as f:
+        return json.load(f)
 
 
 @app.get("/stats")
@@ -979,8 +1005,27 @@ def get_stats():
     resumen["modelo_activo"]      = MODEL_LABEL
     resumen["consultas_web"]      = sum(1 for m in metrics if m.get("channel") == "web")
     resumen["consultas_whatsapp"] = sum(1 for m in metrics if m.get("channel") == "whatsapp")
+    resumen["memoria_mb"]         = get_memory_usage_mb()
+
+    eval_report = load_eval_report()
+    if eval_report:
+        resumen["eval_accuracy"]         = round(eval_report.get("accuracy", 0) * 100, 1)
+        resumen["eval_correctos"]        = eval_report.get("correctos")
+        resumen["eval_total_casos"]      = eval_report.get("total_casos")
+        resumen["eval_aprobado"]         = eval_report.get("aprobado")
+        resumen["eval_accuracy_minima"]  = round(eval_report.get("accuracy_minima", 0) * 100, 1)
+    else:
+        resumen["eval_accuracy"] = None
+
     return resumen
 
+
+@app.get("/eval/latest")
+def get_eval_latest():
+    report = load_eval_report()
+    if not report:
+        return {"error": "No hay reporte de evaluación aún. Corre python eval/evaluador.py"}
+    return report
 
 
 @app.get("/stats/whatsapp")
