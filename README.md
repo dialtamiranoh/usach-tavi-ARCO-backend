@@ -143,8 +143,10 @@ Solo hacen falta dos terminales: el modelo se levanta solo dentro del backend.
 ```bash
 cd usach-tavi-ARCO-backend
 python main.py
-# equivalente: uvicorn main:app --port 8000 --reload
+# equivalente: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 ```
+
+> **Importante si corres el backend dentro de WSL:** no omitas `--host 0.0.0.0`. Sin ese flag, uvicorn por CLI escucha solo en `127.0.0.1` *dentro* de WSL, lo que lo deja inalcanzable desde Windows/el navegador (aunque el proceso esté corriendo perfectamente bien). `python main.py` ya lo hace por defecto — es la forma más segura de evitar este problema.
 
 Al iniciar, el log muestra algo como `Modelo 'Qwen2.5-3B' cargado en 6.0s`.
 Verificar: `http://127.0.0.1:8000` → indica el modelo activo y si quedó cargado.
@@ -230,7 +232,7 @@ cp manual_registro_civil.pdf docs/
 python ingest.py
 
 # Reiniciar el backend
-uvicorn main:app --port 8000 --reload
+python main.py
 ```
 
 ---

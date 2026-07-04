@@ -1,6 +1,7 @@
 """
 main.py — Backend unificado ARCO
-Ejecutar:  python main.py   (o  uvicorn main:app --port 8000 --reload)
+Ejecutar:  python main.py   (o  uvicorn main:app --host 0.0.0.0 --port 8000 --reload)
+Nota WSL: no omitas --host 0.0.0.0, si no uvicorn queda inalcanzable desde Windows.
 
 Modelo LLM:
   Se carga automáticamente in-process (llama-cpp-python) desde la carpeta
@@ -328,7 +329,7 @@ def load_feedbacks() -> list[dict]:
 
 def base_metric_entry(
     trace_id: str, tramite: str, user_query: str, respuesta: str,
-    channel: str, integrante: Optional[str], **extra,
+    channel: str, integrante: Optional[str], telefono: Optional[str] = None, **extra,
 ) -> dict:
     entry = {
         "trace_id":               trace_id,
@@ -338,6 +339,7 @@ def base_metric_entry(
         "respuesta":              respuesta,
         "channel":                channel,
         "integrante":             integrante,
+        "telefono":               telefono,
         "model_label":            MODEL_LABEL,
         "latency_ms":             0,
         "ttft_ms":                None,
@@ -474,6 +476,7 @@ def ask_core(
     trace_id: Optional[str],
     channel: str,
     integrante: Optional[str],
+    telefono: Optional[str] = None,
 ) -> dict:
     trace_id     = trace_id or str(uuid.uuid4())
     query_norm   = normalize_text(query)
@@ -514,7 +517,7 @@ def ask_core(
             "ARCO esta enfocado en tramites del Registro Civil y su orientacion."
         )
         save_metric(base_metric_entry(
-            trace_id, "Fuera del alcance", query, respuesta, channel, integrante,
+            trace_id, "Fuera del alcance", query, respuesta, channel, integrante, telefono,
         ))
         return {
             "tramite": "Fuera del alcance de ARCO", "respuesta": respuesta,
@@ -547,7 +550,7 @@ def ask_core(
             "dentro del alcance actual del demo."
         )
         save_metric(base_metric_entry(
-            trace_id, "No identificado", query, respuesta, channel, integrante,
+            trace_id, "No identificado", query, respuesta, channel, integrante, telefono,
         ))
         return {
             "tramite": "No identificado", "respuesta": respuesta,
@@ -568,7 +571,7 @@ def ask_core(
         }
 
     save_metric(base_metric_entry(
-        trace_id, matched_item["titulo"], query, respuesta_ia, channel, integrante,
+        trace_id, matched_item["titulo"], query, respuesta_ia, channel, integrante, telefono,
         latency_ms=meta.get("latency_ms", 0),
         ttft_ms=meta.get("ttft_ms"),
         input_tokens=meta.get("input_tokens", 0),
@@ -774,6 +777,7 @@ def receive_whatsapp_message(payload: dict):
         trace_id=f"whatsapp-{uuid.uuid4()}",
         channel="whatsapp",
         integrante=integrante,
+        telefono=from_number,
     )
     whatsapp_text = build_whatsapp_reply(arco_response)
     sent = send_whatsapp_message(from_number, whatsapp_text)
@@ -911,12 +915,16 @@ def _percentile95(values: list[float]) -> float:
     return s[idx]
 
 
+NO_MATCH_TRAMITES = {"No identificado", "Fuera del alcance"}
+
+
 def _summarize(subset: list[dict], fb_index: dict) -> dict:
     if not subset:
         return {
             "total_consultas": 0, "promedio_latencia_ms": 0, "p95_latencia_ms": 0,
             "promedio_ttft_ms": 0, "p95_ttft_ms": 0, "total_tokens": 0,
-            "tokens_por_consulta": 0, "tasa_fallback": 0,
+            "tokens_por_consulta": 0, "tokens_por_segundo": 0, "tasa_fallback": 0,
+            "tasa_no_identificado": 0,
             "feedback_positivos": 0, "feedback_negativos": 0, "feedback_neutral": 0,
             "pct_feedback_positivo": 0,
         }
@@ -925,6 +933,15 @@ def _summarize(subset: list[dict], fb_index: dict) -> dict:
     ttfts     = [m["ttft_ms"] for m in subset if m.get("ttft_ms")]
     total_tok = sum(m.get("total_tokens", 0) for m in subset)
     fallbacks = sum(1 for m in subset if m.get("fallback"))
+    no_match  = sum(1 for m in subset if m.get("tramite") in NO_MATCH_TRAMITES)
+
+    # tokens/seg de generación pura: excluye el tiempo de prefill (TTFT), solo el tramo de salida.
+    throughputs = []
+    for m in subset:
+        gen_ms = (m.get("latency_ms") or 0) - (m.get("ttft_ms") or 0)
+        out_tok = m.get("output_tokens", 0)
+        if gen_ms > 0 and out_tok > 0:
+            throughputs.append(out_tok / (gen_ms / 1000))
 
     fb_subset = [fb_index[m["trace_id"]] for m in subset if m["trace_id"] in fb_index]
     positive  = sum(1 for fb in fb_subset if fb["score"] >= 0.8)
@@ -939,7 +956,9 @@ def _summarize(subset: list[dict], fb_index: dict) -> dict:
         "p95_ttft_ms":           round(_percentile95(ttfts), 1),
         "total_tokens":          total_tok,
         "tokens_por_consulta":   round(total_tok / len(subset), 1),
+        "tokens_por_segundo":    round(sum(throughputs) / len(throughputs), 1) if throughputs else 0,
         "tasa_fallback":         round(fallbacks / len(subset) * 100, 2),
+        "tasa_no_identificado":  round(no_match / len(subset) * 100, 2),
         "feedback_positivos":    positive,
         "feedback_negativos":    negative,
         "feedback_neutral":      neutral,
