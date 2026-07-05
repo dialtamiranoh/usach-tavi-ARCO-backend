@@ -413,11 +413,43 @@ redacta una respuesta breve de orientacion para el usuario.
     error    = None
 
     if LLM is None:
-        respuesta     = clean_model_text(item["respuesta"])
-        input_tokens  = 0
-        output_tokens = 0
-        fallback      = True
-        error         = "Modelo LLM no cargado"
+        qwen_url   = os.getenv("QWEN_URL", "")
+        qwen_model = os.getenv("QWEN_MODEL", "qwen2.5-3b-instruct")
+
+        if qwen_url:
+            try:
+                payload = {
+                    "model": qwen_model,
+                    "messages": messages,
+                    "temperature": LLM_TEMPERATURE,
+                    "max_tokens": LLM_MAX_TOKENS,
+                    "stream": False,
+                }
+
+                response = requests.post(qwen_url, json=payload, timeout=120)
+                response.raise_for_status()
+                data = response.json()
+
+                raw_text = data["choices"][0]["message"]["content"]
+                respuesta = clean_model_text(raw_text)
+
+                usage = data.get("usage", {})
+                input_tokens  = int(usage.get("prompt_tokens") or 0)
+                output_tokens = int(usage.get("completion_tokens") or 0)
+                fallback      = False
+                error         = None
+            except Exception as e:
+                respuesta     = clean_model_text(item["respuesta"])
+                input_tokens  = 0
+                output_tokens = 0
+                fallback      = True
+                error         = f"Error llamando LLM HTTP: {e}"
+        else:
+            respuesta     = clean_model_text(item["respuesta"])
+            input_tokens  = 0
+            output_tokens = 0
+            fallback      = True
+            error         = "Modelo LLM no cargado y QWEN_URL no configurado"
     else:
         try:
             with _llm_lock:
