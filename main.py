@@ -305,22 +305,95 @@ def has_real_relation(id_a: str, id_b: str) -> bool:
     return id_b in transitive_dependencies(id_a) or id_a in transitive_dependencies(id_b)
 
 
+def find_unmatched_clauses(user_query: str) -> list[str]:
+    clauses = re.split(r"(?:,|\.|;| pero | y | tambien | ademas )", user_query, flags=re.IGNORECASE)
+
+    all_keywords_norm = []
+    for item in KNOWLEDGE:
+        all_keywords_norm.extend(normalize_text(k) for k in item["keywords"])
+
+    unmatched = []
+    for clause in clauses:
+        clause_stripped = clause.strip()
+        if not clause_stripped:
+            continue
+        clause_norm = normalize_text(clause_stripped)
+        if not any(kw in clause_norm for kw in all_keywords_norm):
+            unmatched.append(clause_stripped)
+
+    return unmatched
+
+
+def extract_relevant_clause(user_query: str, item: dict) -> str:
+    keywords = item.get("keywords")
+    if not keywords:
+        return user_query
+
+    clauses = re.split(r"(?:,|\.|;| pero | y | tambien | ademas )", user_query, flags=re.IGNORECASE)
+    keywords_norm = [normalize_text(k) for k in keywords]
+
+    relevant = []
+    for clause in clauses:
+        clause_norm = normalize_text(clause)
+        if any(kw in clause_norm for kw in keywords_norm):
+            relevant.append(clause.strip())
+
+    if relevant:
+        return " ".join(relevant)
+    return user_query
+
+
+def response_has_foreign_url(texto: str, fuente_valida: Optional[str]) -> bool:
+    urls = re.findall(r"https?://\S+", texto)
+    fuente_normalizada = (fuente_valida or "").rstrip(".,;:")
+    for url in urls:
+        url_normalizada = url.rstrip(".,;:")
+        if url_normalizada != fuente_normalizada:
+            return True
+    return False
+
+
+def build_single_item_fallback(item: dict) -> str:
+    partes = [clean_model_text(item["respuesta"])]
+    if item.get("costo"):
+        partes.append(f"Costo: {item['costo']}.")
+    partes.append(f"Fuente: {item['fuente']}.")
+    return " ".join(partes)
+
+
 def generate_llm_response(
     user_query: str,
     item: dict,
     history: list[ChatMessage],
-    using_previous_context: bool = False
+    using_previous_context: bool = False,
+    ignorar_otros_tramites: bool = False
 ) -> str:
     system_prompt = (
         "eres ARCO, un asistente para el registro civil y su orientacion. "
-        "responde solo con la informacion entregada. "
-        "no inventes requisitos, costos, plazos ni pasos. "
+        "los datos duros (costos, plazos, presencialidad, requisitos legales, fuentes oficiales) "
+        "los debes tomar exclusivamente de la informacion entregada en el contexto, sin inventar "
+        "ni modificar ninguno. nunca generes una fuente oficial (URL) que no sea la entregada. "
+        "el usuario puede mencionar otras situaciones, tramites o documentos ademas del tramite "
+        "principal indicado en el contexto. NO comentes, evalues ni des informacion sobre esas "
+        "otras situaciones bajo ninguna circunstancia, ya que no tienes esa informacion verificada. "
+        "concentra toda tu calidez y cercania unicamente en el tramite principal: puedes reconocer "
+        "que este tramite es importante para el usuario, o transmitir cercania al explicarlo, "
+        "pero sin mencionar la otra situacion que el usuario haya nombrado. "
+        "tu tono debe ser calido y cercano, como una persona real orientando a alguien, "
+        "no como un formulario o una ficha tecnica. "
         "responde en espanol claro, breve y natural. "
         "usa un solo parrafo, sin listas y con maximo 3 oraciones. "
         "si la pregunta es de seguimiento, responde considerando que el usuario sigue hablando del mismo tramite. "
-        "menciona claramente el costo del trámite si está disponible. "
-        "menciona si requiere presencialidad, si requiere clave unica y termina con la fuente oficial."
+        "menciona claramente el costo del trámite principal si está disponible. "
+        "menciona si requiere presencialidad, si requiere clave unica y termina con la fuente oficial entregada."
     )
+
+    if ignorar_otros_tramites:
+        system_prompt += (
+            " el usuario menciono mas de un tramite en su pregunta. "
+            " tu tarea es responder unicamente sobre el tramite indicado en el contexto, "
+            " sin mencionar, comparar ni hacer referencia a ningun otro tramite."
+        )
 
     history_text = build_history_text(history)
 
@@ -492,8 +565,13 @@ def build_independent_responses(
 ) -> list[dict]:
     resultados = []
     for item in items:
+        consulta_relevante = extract_relevant_clause(user_query, item)
         try:
-            texto = generate_llm_response(user_query, item, [], using_previous_context=False)
+            texto = generate_llm_response(
+                consulta_relevante, item, [], using_previous_context=False, ignorar_otros_tramites=True
+            )
+            if response_has_foreign_url(texto, item["fuente"]):
+                texto = build_single_item_fallback(item)
         except Exception:
             texto = clean_model_text(item["respuesta"])
 
@@ -541,6 +619,8 @@ def ask_question(question: Question):
                     question.history,
                     using_previous_context=True
                 )
+                if response_has_foreign_url(respuesta_ia, context_item["fuente"]):
+                    respuesta_ia = build_single_item_fallback(context_item)
             except Exception:
                 respuesta_ia = clean_model_text(context_item["respuesta"])
 
@@ -559,15 +639,26 @@ def ask_question(question: Question):
     if matched_ids:
         if len(matched_ids) == 1:
             matched_item = ID_TO_ITEM[matched_ids[0]]
+            consulta_relevante = extract_relevant_clause(question.query, matched_item)
+            unmatched_clauses = find_unmatched_clauses(question.query)
             try:
                 respuesta_ia = generate_llm_response(
-                    question.query,
+                    consulta_relevante,
                     matched_item,
-                    question.history,
+                    [],
                     using_previous_context=False
                 )
+                if response_has_foreign_url(respuesta_ia, matched_item["fuente"]):
+                    respuesta_ia = build_single_item_fallback(matched_item)
             except Exception:
                 respuesta_ia = clean_model_text(matched_item["respuesta"])
+
+            if unmatched_clauses:
+                partes_sin_cubrir = "; ".join(unmatched_clauses)
+                respuesta_ia = (
+                    f'Sobre "{partes_sin_cubrir}" no tengo informacion dentro del alcance de ARCO. '
+                    f"{respuesta_ia}"
+                )
 
             return {
                 "tramite": matched_item["titulo"],
