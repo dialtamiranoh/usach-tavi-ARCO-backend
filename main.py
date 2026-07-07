@@ -23,6 +23,7 @@ import uuid
 from datetime import datetime
 import os
 import logging
+import psutil
 
 logging.basicConfig(
     level=logging.INFO,
@@ -34,6 +35,7 @@ logging.basicConfig(
 )
 
 logger = logging.getLogger("arco")
+
 
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("sentence_transformers").setLevel(logging.WARNING)
@@ -56,9 +58,71 @@ app.add_middleware(
 # ---------------------------------------------------------------------------
 BASE_DIR       = Path(__file__).resolve().parent
 KNOWLEDGE_PATH = BASE_DIR / "knowledge.json"
+METRICS_PATH   = BASE_DIR / "benchmark_metrics.jsonl"
+FEEDBACK_PATH  = BASE_DIR / "benchmark_feedback.jsonl"
+EVAL_REPORT_PATH = BASE_DIR / "eval" / "reporte_latest.json"
 
 with open(KNOWLEDGE_PATH, "r", encoding="utf-8") as f:
     KNOWLEDGE = json.load(f)
+
+# --- Mapeo de WhatsApp Team ---
+WHATSAPP_TEAM: dict[str, str] = {}
+for _pair in os.getenv("WHATSAPP_TEAM", "").split(","):
+    _pair = _pair.strip()
+    if not _pair or ":" not in _pair:
+        continue
+    _name, _phone = _pair.split(":", 1)
+    WHATSAPP_TEAM[_phone.strip()] = _name.strip()
+
+def resolve_integrante(phone_number: str) -> str:
+    return WHATSAPP_TEAM.get(phone_number, phone_number)
+
+# --- Persistencia de Métricas ---
+def save_metric(entry: dict) -> None:
+    with open(METRICS_PATH, "a", encoding="utf-8") as f:
+        f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
+def save_feedback_entry(entry: dict) -> None:
+    with open(FEEDBACK_PATH, "a", encoding="utf-8") as f:
+        f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
+def load_metrics() -> list[dict]:
+    if not METRICS_PATH.exists():
+        return []
+    with open(METRICS_PATH, "r", encoding="utf-8") as f:
+        return [json.loads(line) for line in f if line.strip()]
+
+def load_feedbacks() -> list[dict]:
+    if not FEEDBACK_PATH.exists():
+        return []
+    with open(FEEDBACK_PATH, "r", encoding="utf-8") as f:
+        return [json.loads(line) for line in f if line.strip()]
+
+def base_metric_entry(
+    trace_id: str, tramite: str, user_query: str, respuesta: str,
+    channel: str, integrante: Optional[str], telefono: Optional[str] = None, **extra,
+) -> dict:
+    return {
+        "trace_id":               trace_id,
+        "timestamp":              datetime.now().isoformat(),
+        "tramite":                tramite,
+        "user_query":             user_query,
+        "respuesta":              respuesta,
+        "channel":                channel,
+        "integrante":             integrante,
+        "telefono":               telefono,
+        "model_label":            MODEL["label"],
+        "model_id":               MODEL["model"],
+        "latency_ms":             extra.get("latency_ms", 0),
+        "ttft_ms":                extra.get("ttft_ms"),
+        "input_tokens":           extra.get("input_tokens", 0),
+        "output_tokens":          extra.get("output_tokens", 0),
+        "total_tokens":           extra.get("total_tokens", 0),
+        "fallback":               extra.get("fallback", False),
+        "error":                  extra.get("error"),
+        "using_previous_context": extra.get("using_previous_context", False),
+    }
+
 
 # ---------------------------------------------------------------------------
 # Configuración del modelo (uno solo)
@@ -153,6 +217,13 @@ class Question(BaseModel):
     history:  list[ChatMessage] = Field(default_factory=list)
     context:  Optional[ContextData] = None
     trace_id: Optional[str] = None
+
+
+class Feedback(BaseModel):
+    trace_id: str
+    score:    float
+    comment:  Optional[str] = None
+
 
 
 # ---------------------------------------------------------------------------
@@ -468,8 +539,9 @@ def receive_whatsapp_message(payload: dict):
         return {"status": "ignored", "reason": "payload sin mensaje de texto"}
 
     from_number, user_text, should_call_arco = extracted
+    integrante = resolve_integrante(from_number)
 
-    logger.info("Mensaje WhatsApp desde %s: %s", from_number, user_text)
+    logger.info("Mensaje WhatsApp desde %s (%s): %s", from_number, integrante, user_text)
 
     if not should_call_arco:
         sent = send_whatsapp_message(from_number, user_text)
@@ -487,7 +559,12 @@ def receive_whatsapp_message(payload: dict):
         trace_id=f"whatsapp-{uuid.uuid4()}",
     )
 
-    arco_response = ask_question(question)
+    arco_response = ask_core(
+        question,
+        channel="whatsapp",
+        integrante=integrante,
+        telefono=from_number
+    )
     whatsapp_text = build_whatsapp_reply(arco_response)
     sent = send_whatsapp_message(from_number, whatsapp_text)
 
@@ -495,12 +572,12 @@ def receive_whatsapp_message(payload: dict):
         "status": "processed",
         "sent": sent,
         "from": from_number,
+        "integrante": integrante,
         "tramite": arco_response.get("tramite"),
         "trace_id": arco_response.get("trace_id"),
     }
 
 
-# ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
 
@@ -570,8 +647,12 @@ def get_models():
     return {"label": MODEL["label"], "url": MODEL["url"], "model_id": MODEL["model"]}
 
 
-@app.post("/ask")
-def ask_question(question: Question):
+def ask_core(
+    question: Question,
+    channel: str = "web",
+    integrante: Optional[str] = None,
+    telefono: Optional[str] = None,
+) -> dict:
     trace_id  = question.trace_id or str(uuid.uuid4())
     query     = normalize_text(question.query)
 
@@ -584,7 +665,6 @@ def ask_question(question: Question):
         if rag_results:
             mejor = rag_results[0]
             matched_item = {
-                
                 "titulo":               mejor["titulo"] or "Resultado RAG",
                 "respuesta":            mejor["texto"],
                 "costo":                mejor.get("costo"),
@@ -594,7 +674,6 @@ def ask_question(question: Question):
                 "requiere_clave_unica": mejor.get("requiere_clave_unica", "ver fuente oficial"),
                 "fuente":               mejor["fuente"] or "",
             }
-            
 
     # Búsqueda por keywords en knowledge.json
     if not matched_item:
@@ -612,6 +691,9 @@ def ask_question(question: Question):
             "La renovacion de licencia de conducir no corresponde al Registro Civil. "
             "ARCO esta enfocado en tramites del Registro Civil y su orientacion."
         )
+        save_metric(base_metric_entry(
+            trace_id, "Fuera del alcance", question.query, respuesta, channel, integrante, telefono
+        ))
         return {
             "tramite": "Fuera del alcance de ARCO", "respuesta": respuesta,
             "respuesta_base": None, "costo": None, "duracion": None,
@@ -629,6 +711,8 @@ def ask_question(question: Question):
 
     logger.info(
         f"query='{question.query}' "
+        f"canal={channel} "
+        f"integrante={integrante or '-'} "
         f"tramite='{matched_item['titulo'] if matched_item else 'No identificado'}' "
         f"rag={USE_RAG} "
         f"followup={using_previous_context}"
@@ -640,6 +724,9 @@ def ask_question(question: Question):
             "ARCO todavia no tiene informacion suficiente para orientar ese tramite "
             "dentro del alcance actual del demo."
         )
+        save_metric(base_metric_entry(
+            trace_id, "No identificado", question.query, respuesta, channel, integrante, telefono
+        ))
         return {
             "tramite": "No identificado", "respuesta": respuesta,
             "respuesta_base": None, "costo": None, "duracion": None,
@@ -662,6 +749,18 @@ def ask_question(question: Question):
             "model_label": MODEL["label"], "model_id": MODEL["model"],
         }
 
+    save_metric(base_metric_entry(
+        trace_id, matched_item["titulo"], question.query, respuesta_ia, channel, integrante, telefono,
+        latency_ms=meta.get("latency_ms", 0),
+        ttft_ms=meta.get("ttft_ms"),
+        input_tokens=meta.get("input_tokens", 0),
+        output_tokens=meta.get("output_tokens", 0),
+        total_tokens=meta.get("total_tokens", 0),
+        fallback=meta.get("fallback", False),
+        error=meta.get("error"),
+        using_previous_context=using_previous_context,
+    ))
+
     return {
         "tramite":               matched_item["titulo"],
         "respuesta":             respuesta_ia,
@@ -678,5 +777,190 @@ def ask_question(question: Question):
         "total_tokens":          meta["total_tokens"],
         "fallback":              meta["fallback"],
     }
+
+
+@app.post("/ask")
+def ask_question(question: Question):
+    return ask_core(question, channel="web")
+
+
+@app.post("/feedback")
+def submit_feedback(feedback: Feedback):
+    save_feedback_entry({
+        "trace_id":  feedback.trace_id,
+        "score":     feedback.score,
+        "comment":   feedback.comment,
+        "timestamp": datetime.now().isoformat(),
+    })
+    return {"status": "ok"}
+
+
+# ---------------------------------------------------------------------------
+# Endpoints de métricas
+# ---------------------------------------------------------------------------
+
+@app.get("/metrics")
+def get_metrics():
+    metrics   = load_metrics()
+    feedbacks = load_feedbacks()
+    fb_index  = {fb["trace_id"]: fb for fb in feedbacks}
+    for m in metrics:
+        m["feedback"] = fb_index.get(m["trace_id"])
+    return metrics
+
+
+def _percentile95(values: list[float]) -> float:
+    if not values:
+        return 0
+    s = sorted(values)
+    idx = max(int(len(s) * 0.95) - 1, 0)
+    return s[idx]
+
+
+NO_MATCH_TRAMITES = {"No identificado", "Fuera del alcance"}
+
+
+def _summarize(subset: list[dict], fb_index: dict) -> dict:
+    if not subset:
+        return {
+            "total_consultas": 0, "promedio_latencia_ms": 0, "p95_latencia_ms": 0,
+            "promedio_ttft_ms": 0, "p95_ttft_ms": 0, "total_tokens": 0,
+            "tokens_por_consulta": 0, "tokens_por_segundo": 0, "tasa_fallback": 0,
+            "tasa_no_identificado": 0, "consultas_por_hora": 0,
+            "feedback_positivos": 0, "feedback_negativos": 0, "feedback_neutral": 0,
+            "pct_feedback_positivo": 0,
+        }
+
+    latencies = [m["latency_ms"] for m in subset if m.get("latency_ms")]
+    ttfts     = [m["ttft_ms"] for m in subset if m.get("ttft_ms")]
+    total_tok = sum(m.get("total_tokens", 0) for m in subset)
+    fallbacks = sum(1 for m in subset if m.get("fallback"))
+    no_match  = sum(1 for m in subset if m.get("tramite") in NO_MATCH_TRAMITES)
+
+    throughputs = []
+    for m in subset:
+        gen_ms = (m.get("latency_ms") or 0) - (m.get("ttft_ms") or 0)
+        out_tok = m.get("output_tokens", 0)
+        if gen_ms > 0 and out_tok > 0:
+            throughputs.append(out_tok / (gen_ms / 1000))
+
+    timestamps = sorted(m["timestamp"] for m in subset if m.get("timestamp"))
+    if len(timestamps) >= 2:
+        span_hours = max(
+            (datetime.fromisoformat(timestamps[-1]) - datetime.fromisoformat(timestamps[0])).total_seconds() / 3600,
+            1 / 60,
+        )
+        consultas_por_hora = round(len(subset) / span_hours, 2)
+    else:
+        consultas_por_hora = 0
+
+    fb_subset = [fb_index[m["trace_id"]] for m in subset if m["trace_id"] in fb_index]
+    positive  = sum(1 for fb in fb_subset if fb["score"] >= 0.8)
+    negative  = sum(1 for fb in fb_subset if fb["score"] <= 0.2)
+    neutral   = len(fb_subset) - positive - negative
+
+    return {
+        "total_consultas":       len(subset),
+        "promedio_latencia_ms":  round(sum(latencies) / len(latencies), 1) if latencies else 0,
+        "p95_latencia_ms":       round(_percentile95(latencies), 1),
+        "promedio_ttft_ms":      round(sum(ttfts) / len(ttfts), 1) if ttfts else 0,
+        "p95_ttft_ms":           round(_percentile95(ttfts), 1),
+        "total_tokens":          total_tok,
+        "tokens_por_consulta":   round(total_tok / len(subset), 1),
+        "tokens_por_segundo":    round(sum(throughputs) / len(throughputs), 1) if throughputs else 0,
+        "tasa_fallback":         round(fallbacks / len(subset) * 100, 2),
+        "tasa_no_identificado":  round(no_match / len(subset) * 100, 2),
+        "consultas_por_hora":    consultas_por_hora,
+        "feedback_positivos":    positive,
+        "feedback_negativos":    negative,
+        "feedback_neutral":      neutral,
+        "pct_feedback_positivo": round(positive / len(fb_subset) * 100, 1) if fb_subset else 0,
+    }
+
+
+def get_memory_usage_mb() -> float:
+    return round(psutil.Process(os.getpid()).memory_info().rss / (1024 * 1024), 1)
+
+
+def load_eval_report() -> Optional[dict]:
+    if not EVAL_REPORT_PATH.exists():
+        return None
+    with open(EVAL_REPORT_PATH, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+@app.get("/stats")
+def get_stats():
+    metrics = load_metrics()
+    if not metrics:
+        return {"error": "No hay métricas aún"}
+
+    feedbacks = load_feedbacks()
+    fb_index  = {fb["trace_id"]: fb for fb in feedbacks}
+
+    resumen = _summarize(metrics, fb_index)
+    resumen["modelo_activo"]      = MODEL["label"]
+    resumen["consultas_web"]      = sum(1 for m in metrics if m.get("channel") == "web")
+    resumen["consultas_whatsapp"] = sum(1 for m in metrics if m.get("channel") == "whatsapp")
+    resumen["memoria_mb"]         = get_memory_usage_mb()
+
+    eval_report = load_eval_report()
+    if eval_report:
+        resumen["eval_accuracy"]         = round(eval_report.get("accuracy", 0) * 100, 1)
+        resumen["eval_correctos"]        = eval_report.get("correctos")
+        resumen["eval_total_casos"]      = eval_report.get("total_casos")
+        resumen["eval_aprobado"]         = eval_report.get("aprobado")
+        resumen["eval_accuracy_minima"]  = round(eval_report.get("accuracy_minima", 0) * 100, 1)
+    else:
+        resumen["eval_accuracy"] = None
+
+    return resumen
+
+
+@app.get("/eval/latest")
+def get_eval_latest():
+    report = load_eval_report()
+    if not report:
+        return {"error": "No hay reporte de evaluación aún. Corre python eval/evaluador.py"}
+    return report
+
+
+@app.get("/stats/whatsapp")
+def get_stats_whatsapp():
+    metrics   = [m for m in load_metrics() if m.get("channel") == "whatsapp"]
+    feedbacks = load_feedbacks()
+    fb_index  = {fb["trace_id"]: fb for fb in feedbacks}
+
+    por_integrante: dict[str, list[dict]] = {}
+    for m in metrics:
+        nombre = m.get("integrante") or "Desconocido"
+        por_integrante.setdefault(nombre, []).append(m)
+
+    result = {}
+    for nombre, subset in por_integrante.items():
+        s = _summarize(subset, fb_index)
+        s["ultima_consulta"] = max(m["timestamp"] for m in subset)
+        result[nombre] = s
+    return result
+
+
+@app.get("/metrics/timeline")
+def get_timeline(limit: int = 50):
+    metrics = sorted(load_metrics(), key=lambda x: x.get("timestamp", ""))
+    subset  = metrics[-limit:]
+    return [
+        {
+            "timestamp":  m["timestamp"],
+            "latency_ms": round(m.get("latency_ms", 0), 1),
+            "ttft_ms":    round(m["ttft_ms"], 1) if m.get("ttft_ms") else None,
+            "tokens":     m.get("total_tokens", 0),
+            "fallback":   m.get("fallback", False),
+            "tramite":    m.get("tramite", ""),
+            "channel":    m.get("channel", "web"),
+            "integrante": m.get("integrante"),
+        }
+        for m in subset
+    ]
+
 
 

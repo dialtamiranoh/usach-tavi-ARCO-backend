@@ -13,6 +13,7 @@ from unittest.mock import patch
 from datetime import datetime
 
 os.environ["USE_RAG"] = "false"
+os.environ["ARCO_SKIP_MODEL_LOAD"] = "true"
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -33,10 +34,8 @@ ACCURACY_MINIMA = 0.90
 client = TestClient(app)
 
 MOCK_META = {
-    "latency_ms": 0, "input_tokens": 0, "output_tokens": 0,
+    "latency_ms": 0, "ttft_ms": None, "input_tokens": 0, "output_tokens": 0,
     "total_tokens": 0, "fallback": False, "error": None,
-    "model_key": "granite", "model_label": "Granite-3.1-3B",
-    "model_id": "granite-3.1-3b-instruct"
 }
 
 def evaluar():
