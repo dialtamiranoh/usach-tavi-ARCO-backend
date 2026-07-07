@@ -731,6 +731,7 @@ def ask_question(question: Question):
             "modo": "plan",
             "tramite": " + ".join(item["titulo"] for item in ordered_items),
             "respuesta": respuesta_ia,
+            "intro": intro,
             "respuesta_base": None,
             "costo": None,
             "duracion": None,
