@@ -180,6 +180,7 @@ if USE_RAG:
         items = []
         for doc, meta in zip(results["documents"][0], results["metadatas"][0]):
             items.append({
+                "id":                   meta.get("tramite_id"),
                 "texto":                doc,
                 "source":               meta.get("source", ""),
                 "titulo":               meta.get("titulo", ""),
@@ -277,6 +278,491 @@ def build_history_text(history: list[ChatMessage]) -> str:
     if not history:
         return "sin historial previo"
     return "\n".join(f"{m.role}: {m.content}" for m in history[-6:])
+
+
+# --- Funciones NLP y Multi-Trámite (pruebas-pablo) ---
+LLM_URL = MODEL["url"]
+LLM_MODEL = MODEL["model"]
+
+def build_dependency_index(knowledge: list[dict]):
+    id_to_item = {}
+    manual_deps = {}
+
+    for item in knowledge:
+        item_id = item.get("id")
+        if not item_id:
+            continue
+        id_to_item[item_id] = item
+        manual_deps[item_id] = set(item.get("depende_de", []))
+
+    def transitive_manual(start_id: str) -> set[str]:
+        seen = set()
+        pending = list(manual_deps.get(start_id, set()))
+        while pending:
+            current = pending.pop()
+            if current in seen:
+                continue
+            seen.add(current)
+            pending.extend(manual_deps.get(current, set()))
+        return seen
+
+    clave_unica_prereqs = transitive_manual("clave_unica")
+
+    dependencies = {}
+    for item_id, item in id_to_item.items():
+        deps = set(manual_deps.get(item_id, set()))
+        if (
+            item_id != "clave_unica"
+            and item_id not in clave_unica_prereqs
+            and item.get("requiere_clave_unica") in ("si", "depende")
+        ):
+            deps.add("clave_unica")
+        dependencies[item_id] = deps
+
+    return id_to_item, dependencies
+
+
+ID_TO_ITEM, DEPENDENCIES = build_dependency_index(KNOWLEDGE)
+
+
+def expand_dependencies(matched_ids: list[str]) -> list[str]:
+    expanded = list(matched_ids)
+    seen = set(matched_ids)
+    pending = list(matched_ids)
+
+    while pending:
+        current = pending.pop(0)
+        for dep in sorted(DEPENDENCIES.get(current, set())):
+            if dep not in seen and dep in ID_TO_ITEM:
+                seen.add(dep)
+                expanded.append(dep)
+                pending.append(dep)
+
+    return expanded
+
+
+def topological_order(ids: list[str]) -> list[str]:
+    id_set = set(ids)
+    graph = {i: {d for d in DEPENDENCIES.get(i, set()) if d in id_set} for i in ids}
+    order = []
+    visited = set()
+    temp = set()
+
+    def visit(node):
+        if node in visited or node in temp:
+            return
+        temp.add(node)
+        for dep in graph.get(node, set()):
+            visit(dep)
+        temp.discard(node)
+        visited.add(node)
+        order.append(node)
+
+    for node in ids:
+        visit(node)
+
+    return order
+
+
+def keyword_match(query_normalizada: str) -> list[str]:
+    ids = []
+    seen = set()
+    for item in KNOWLEDGE:
+        item_id = item.get("id")
+        if item_id in seen:
+            continue
+        for keyword in item["keywords"]:
+            if normalize_text(keyword) in query_normalizada:
+                if item_id:
+                    ids.append(item_id)
+                    seen.add(item_id)
+                break
+    return ids
+
+
+def classify_tramites_with_llm(user_query: str) -> Optional[list[str]]:
+    catalogo = "\n".join(f"- {item['id']}: {item['titulo']}" for item in KNOWLEDGE)
+
+    system_prompt = (
+        "eres un clasificador de intencion para tramites del registro civil de chile. "
+        "recibes una consulta de un usuario y un catalogo de tramites, cada uno con su id. "
+        "tu unica tarea es identificar cuales ids del catalogo corresponden a lo que el usuario "
+        "esta pidiendo o mencionando, incluyendo sinonimos y formas coloquiales de preguntar. "
+        "responde EXCLUSIVAMENTE con un arreglo json de strings con los ids que correspondan, "
+        "sin texto adicional, sin explicaciones, sin markdown. "
+        "si ningun tramite del catalogo corresponde, responde con un arreglo vacio []. "
+        "nunca inventes un id que no este en el catalogo."
+    )
+
+    user_prompt = f"""
+catalogo de tramites:
+{catalogo}
+
+consulta del usuario: {user_query}
+
+responde solo con el arreglo json de ids.
+""".strip()
+
+    payload = {
+        "model": LLM_MODEL,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt}
+        ],
+        "temperature": 0.0,
+        "max_tokens": 200
+    }
+
+    try:
+        response = requests.post(LLM_URL, json=payload, timeout=60)
+        response.raise_for_status()
+        data = response.json()
+        raw_text = data["choices"][0]["message"]["content"].strip()
+        raw_text = re.sub(r"^```(json)?", "", raw_text).strip()
+        raw_text = re.sub(r"```$", "", raw_text).strip()
+
+        parsed = json.loads(raw_text)
+        if not isinstance(parsed, list):
+            return None
+
+        valid_ids = []
+        seen = set()
+        for candidate in parsed:
+            if isinstance(candidate, str) and candidate in ID_TO_ITEM and candidate not in seen:
+                valid_ids.append(candidate)
+                seen.add(candidate)
+
+        return valid_ids
+    except Exception:
+        return None
+
+
+CONCERN_IDS = {"cedula_identidad_chilenos", "cedula_identidad_extranjeros", "clave_unica"}
+
+
+def transitive_dependencies(item_id: str) -> set[str]:
+    seen = set()
+    pending = list(DEPENDENCIES.get(item_id, set()))
+    while pending:
+        current = pending.pop()
+        if current in seen:
+            continue
+        seen.add(current)
+        pending.extend(DEPENDENCIES.get(current, set()))
+    return seen
+
+
+def has_real_relation(id_a: str, id_b: str) -> bool:
+    return id_b in transitive_dependencies(id_a) or id_a in transitive_dependencies(id_b)
+
+
+def find_unmatched_clauses(user_query: str) -> list[str]:
+    clauses = re.split(r"(?:,|\.|;| pero | y | tambien | ademas )", user_query, flags=re.IGNORECASE)
+
+    all_keywords_norm = []
+    for item in KNOWLEDGE:
+        all_keywords_norm.extend(normalize_text(k) for k in item["keywords"])
+
+    unmatched = []
+    for clause in clauses:
+        clause_stripped = clause.strip()
+        if not clause_stripped:
+            continue
+        clause_norm = normalize_text(clause_stripped)
+        if not any(kw in clause_norm for kw in all_keywords_norm):
+            unmatched.append(clause_stripped)
+
+    return unmatched
+
+
+def extract_relevant_clause(user_query: str, item: dict) -> str:
+    keywords = item.get("keywords")
+    if not keywords:
+        return user_query
+
+    clauses = re.split(r"(?:,|\.|;| pero | y | tambien | ademas )", user_query, flags=re.IGNORECASE)
+    keywords_norm = [normalize_text(k) for k in keywords]
+
+    relevant = []
+    for clause in clauses:
+        clause_norm = normalize_text(clause)
+        if any(kw in clause_norm for kw in keywords_norm):
+            relevant.append(clause.strip())
+
+    if relevant:
+        return " ".join(relevant)
+    return user_query
+
+
+def response_has_foreign_url(texto: str, fuente_valida: Optional[str]) -> bool:
+    urls = re.findall(r"https?://\S+", texto)
+    fuente_normalizada = (fuente_valida or "").rstrip(".,;:")
+    for url in urls:
+        url_normalizada = url.rstrip(".,;:")
+        if url_normalizada != fuente_normalizada:
+            return True
+    return False
+
+
+def build_single_item_fallback(item: dict) -> str:
+    partes = [clean_model_text(item["respuesta"])]
+    if item.get("costo"):
+        partes.append(f"Costo: {item['costo']}.")
+    partes.append(f"Fuente: {item['fuente']}.")
+    return " ".join(partes)
+
+
+def generate_llm_response(
+    user_query: str,
+    item: dict,
+    history: list[ChatMessage],
+    using_previous_context: bool = False,
+    ignorar_otros_tramites: bool = False
+) -> tuple[str, dict]:
+    system_prompt = SYSTEM_PROMPT
+    
+    # Agregar reglas específicas de anti-alucinación de Pablo
+    system_prompt += (
+        " los datos duros (costos, plazos, presencialidad, requisitos legales, fuentes oficiales) "
+        " los debes tomar exclusivamente de la informacion entregada en el contexto, sin inventar "
+        " ni modificar ninguno. nunca generes una fuente oficial (URL) que no sea la entregada. "
+        " el usuario puede mencionar otras situaciones, tramites o documentos ademas del tramite "
+        " principal indicado en el contexto. NO comentes, evalues ni des informacion sobre esas "
+        " otras situaciones bajo ninguna circunstancia, ya que no tienes esa informacion verificada. "
+        " concentra toda tu calidez y cercania unicamente en el tramite principal: puedes reconocer "
+        " que este tramite es importante para el usuario, o transmitir cercania al explicarlo, "
+        " pero sin mencionar la otra situacion que el usuario haya nombrado."
+    )
+
+    if ignorar_otros_tramites:
+        system_prompt += (
+            " el usuario menciono mas de un tramite en su pregunta. "
+            " tu tarea es responder unicamente sobre el tramite indicado en el contexto, "
+            " sin mencionar, comparar ni hacer referencia a ningun otro tramite."
+        )
+
+    history_text = build_history_text(history)
+
+    context_text = f"""
+        tramite: {item['titulo']}
+        respuesta base: {item['respuesta']}
+        costo: {item.get('costo', 'no especificado')}
+        duracion: {item.get('duracion', 'no especificada')}
+        canal: {item['canal']}
+        presencialidad: {item['presencialidad']}
+        requiere clave unica: {item['requiere_clave_unica']}
+        fuente oficial: {item['fuente']}
+        """.strip()
+
+    followup_note = (
+        "esta pregunta parece ser continuacion del mismo tramite detectado anteriormente."
+        if using_previous_context
+        else "esta pregunta corresponde a un tramite detectado directamente."
+    )
+
+    user_prompt = f"""
+pregunta actual del usuario: {user_query}
+
+historial reciente:
+{history_text}
+
+contexto del tramite:
+{context_text}
+
+nota:
+{followup_note}
+
+redacta una respuesta breve de orientacion para el usuario.
+""".strip()
+
+    payload = {
+        "model": LLM_MODEL,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt}
+        ],
+        "temperature": LLM_TEMPERATURE,
+        "max_tokens": LLM_MAX_TOKENS
+    }
+
+    input_tokens = estimate_tokens(json.dumps(payload["messages"], ensure_ascii=False))
+    start = time.time()
+    fallback = False
+    error = None
+
+    try:
+        response = requests.post(LLM_URL, json=payload, timeout=120)
+        response.raise_for_status()
+        data = response.json()
+        raw_text = data["choices"][0]["message"]["content"].strip()
+        respuesta = clean_model_text(raw_text)
+
+        usage = data.get("usage", {})
+        if usage:
+            input_tokens = usage.get("prompt_tokens", input_tokens)
+            output_tokens = usage.get("completion_tokens", 0)
+        else:
+            output_tokens = estimate_tokens(respuesta)
+    except Exception as e:
+        respuesta = clean_model_text(item["respuesta"])
+        input_tokens = 0
+        output_tokens = 0
+        fallback = True
+        error = str(e)
+
+    elapsed_ms = (time.time() - start) * 1000
+
+    return respuesta, {
+        "latency_ms": elapsed_ms,
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "total_tokens": input_tokens + output_tokens,
+        "fallback": fallback,
+        "error": error
+    }
+
+
+def build_plan_text(ordered_items: list[dict]) -> str:
+    lineas = []
+    for i, item in enumerate(ordered_items):
+        partes = [f"Paso {i + 1}: {item['titulo']}."]
+        partes.append(clean_model_text(item["respuesta"]))
+        if item.get("costo"):
+            partes.append(f"Costo: {item['costo']}.")
+        if item.get("presencialidad"):
+            partes.append(f"Presencialidad: {item['presencialidad']}.")
+        if item.get("requiere_clave_unica"):
+            partes.append(f"Requiere ClaveUnica: {item['requiere_clave_unica']}.")
+        lineas.append(" ".join(partes))
+    return "\n\n".join(lineas)
+
+
+def generate_plan_intro(user_query: str, ordered_items: list[dict]) -> Optional[str]:
+    system_prompt = (
+        "eres ARCO, un asistente para el registro civil y su orientacion. "
+        "escribe una sola oracion breve introduciendo un plan de tramites. "
+        "no menciones costos, plazos ni detalles, solo una introduccion general. "
+        "maximo 20 palabras."
+    )
+
+    tramites_nombres = ", ".join(item["titulo"] for item in ordered_items)
+
+    user_prompt = f"""
+pregunta del usuario: {user_query}
+
+tramites incluidos en el plan, en orden: {tramites_nombres}
+
+escribe una sola oracion breve de introduccion al plan.
+""".strip()
+
+    payload = {
+        "model": LLM_MODEL,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt}
+        ],
+        "temperature": 0.1,
+        "max_tokens": 60
+    }
+
+    try:
+        response = requests.post(LLM_URL, json=payload, timeout=60)
+        response.raise_for_status()
+        data = response.json()
+        raw_text = data["choices"][0]["message"]["content"].strip()
+        return clean_model_text(raw_text)
+    except Exception:
+        return None
+
+
+def generate_aclaracion_intro(user_query: str, main_item: dict, concern_items: list[dict]) -> Optional[str]:
+    system_prompt = (
+        "eres ARCO, un asistente para el registro civil y su orientacion. "
+        "escribe una sola oracion breve confirmando, segun el campo entregado, "
+        "si el usuario necesita o no el documento que le preocupa para el tramite principal. "
+        "no agregues costos, plazos ni pasos. maximo 20 palabras."
+    )
+
+    concern_titulos = " y ".join(item["titulo"] for item in concern_items)
+
+    user_prompt = f"""
+pregunta del usuario: {user_query}
+
+tramite principal: {main_item['titulo']}
+requiere clave unica: {main_item['requiere_clave_unica']}
+documento que preocupa al usuario: {concern_titulos}
+
+escribe una sola oracion breve confirmando si es necesario o no ese documento para este tramite.
+""".strip()
+
+    payload = {
+        "model": LLM_MODEL,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt}
+        ],
+        "temperature": 0.1,
+        "max_tokens": 50
+    }
+
+    try:
+        response = requests.post(LLM_URL, json=payload, timeout=60)
+        response.raise_for_status()
+        data = response.json()
+        raw_text = data["choices"][0]["message"]["content"].strip()
+        return clean_model_text(raw_text)
+    except Exception:
+        return None
+
+
+def build_aclaracion_text(main_item: dict, concern_items: list[dict]) -> str:
+    concern_titulos = " ni tu ".join(item["titulo"] for item in concern_items)
+    requiere = main_item["requiere_clave_unica"]
+
+    if requiere == "no":
+        aclaracion = f"No necesitas tu {concern_titulos} para este tramite."
+    elif requiere == "si":
+        aclaracion = f"Este tramite si requiere ClaveUnica vigente, y por lo tanto tambien tu {concern_titulos} al dia."
+    else:
+        aclaracion = f"La necesidad de tu {concern_titulos} depende de las condiciones especificas de tu caso."
+
+    partes = [aclaracion, clean_model_text(main_item["respuesta"])]
+    if main_item.get("costo"):
+        partes.append(f"Costo: {main_item['costo']}.")
+    partes.append(f"Fuente: {main_item['fuente']}.")
+    return " ".join(partes)
+
+
+def build_independent_responses(
+    user_query: str,
+    items: list[dict],
+    history: list[ChatMessage]
+) -> list[dict]:
+    resultados = []
+    for item in items:
+        consulta_relevante = extract_relevant_clause(user_query, item)
+        try:
+            texto, meta = generate_llm_response(
+                consulta_relevante, item, [], using_previous_context=False, ignorar_otros_tramites=True
+            )
+            if response_has_foreign_url(texto, item["fuente"]):
+                texto = build_single_item_fallback(item)
+        except Exception:
+            texto = clean_model_text(item["respuesta"])
+
+        resultados.append({
+            "tramite": item["titulo"],
+            "respuesta": texto,
+            "respuesta_base": item["respuesta"],
+            "costo": item.get("costo", None),
+            "duracion": item.get("duracion", None),
+            "canal": item["canal"],
+            "presencialidad": item["presencialidad"],
+            "requiere_clave_unica": item["requiere_clave_unica"],
+            "fuente": item["fuente"]
+        })
+
+    return resultados
 
 
 # ---------------------------------------------------------------------------
@@ -653,46 +1139,53 @@ def ask_core(
     integrante: Optional[str] = None,
     telefono: Optional[str] = None,
 ) -> dict:
-    trace_id  = question.trace_id or str(uuid.uuid4())
-    query     = normalize_text(question.query)
+    trace_id = question.trace_id or str(uuid.uuid4())
+    query = normalize_text(question.query)
 
-    matched_item           = None
+    start_time = time.time()
+    total_input_tokens = 0
+    total_output_tokens = 0
+    fallback = False
+    error = None
     using_previous_context = False
 
-    # RAG (si está activo)
+    # 1. Identificar todos los trámites posibles (RAG + Keywords)
+    matched_ids = []
+    seen_ids = set()
+
+    # RAG matches (si está activo)
     if USE_RAG:
         rag_results = search_rag(question.query)
-        if rag_results:
-            mejor = rag_results[0]
-            matched_item = {
-                "titulo":               mejor["titulo"] or "Resultado RAG",
-                "respuesta":            mejor["texto"],
-                "costo":                mejor.get("costo"),
-                "duracion":             mejor.get("duracion"),
-                "canal":                mejor.get("canal", "ver fuente oficial"),
-                "presencialidad":       mejor.get("presencialidad", "ver fuente oficial"),
-                "requiere_clave_unica": mejor.get("requiere_clave_unica", "ver fuente oficial"),
-                "fuente":               mejor["fuente"] or "",
-            }
+        for r in rag_results:
+            rid = r.get("id")
+            if rid and rid in ID_TO_ITEM and rid not in seen_ids:
+                matched_ids.append(rid)
+                seen_ids.add(rid)
 
-    # Búsqueda por keywords en knowledge.json
-    if not matched_item:
-        for item in KNOWLEDGE:
-            for kw in item["keywords"]:
-                if normalize_text(kw) in query:
-                    matched_item = item
-                    break
-            if matched_item:
-                break
+    # Keyword matches
+    kw_ids = keyword_match(query)
+    for kid in kw_ids:
+        if kid not in seen_ids:
+            matched_ids.append(kid)
+            seen_ids.add(kid)
 
-    # Caso especial: licencia de conducir
-    if "licencia de conducir" in query or "renovar licencia" in query:
+    # Caso especial: licencia de conducir (fuera de dominio)
+    query_raw_lower = question.query.lower()
+    if "licencia de conducir" in query_raw_lower or "renovar licencia" in query_raw_lower:
         respuesta = (
             "La renovacion de licencia de conducir no corresponde al Registro Civil. "
             "ARCO esta enfocado en tramites del Registro Civil y su orientacion."
         )
+        total_latency_ms = (time.time() - start_time) * 1000
         save_metric(base_metric_entry(
-            trace_id, "Fuera del alcance", question.query, respuesta, channel, integrante, telefono
+            trace_id, "Fuera del alcance", question.query, respuesta, channel, integrante, telefono,
+            latency_ms=total_latency_ms,
+            ttft_ms=None,
+            input_tokens=0,
+            output_tokens=0,
+            total_tokens=0,
+            fallback=False,
+            error=None
         ))
         return {
             "tramite": "Fuera del alcance de ARCO", "respuesta": respuesta,
@@ -702,30 +1195,36 @@ def ask_core(
             "trace_id": trace_id, "model_used": MODEL["label"],
         }
 
-    # Seguimiento de contexto previo
-    if not matched_item and question.context and is_followup_query(question.query):
-        ctx_item = context_to_item(question.context)
-        if ctx_item:
-            matched_item           = ctx_item
-            using_previous_context = True
-
-    logger.info(
-        f"query='{question.query}' "
-        f"canal={channel} "
-        f"integrante={integrante or '-'} "
-        f"tramite='{matched_item['titulo'] if matched_item else 'No identificado'}' "
-        f"rag={USE_RAG} "
-        f"followup={using_previous_context}"
-    )
+    # Seguimiento de contexto previo (solo si no hay coincidencias directas)
+    context_item = None
+    if not matched_ids and question.context and is_followup_query(question.query):
+        context_item = context_to_item(question.context)
+        if context_item:
+            ctx_id = None
+            for k_id, item in ID_TO_ITEM.items():
+                if item["titulo"] == context_item["titulo"]:
+                    ctx_id = k_id
+                    break
+            if ctx_id:
+                matched_ids = [ctx_id]
+                using_previous_context = True
 
     # Trámite no identificado
-    if not matched_item:
+    if not matched_ids:
         respuesta = (
             "ARCO todavia no tiene informacion suficiente para orientar ese tramite "
             "dentro del alcance actual del demo."
         )
+        total_latency_ms = (time.time() - start_time) * 1000
         save_metric(base_metric_entry(
-            trace_id, "No identificado", question.query, respuesta, channel, integrante, telefono
+            trace_id, "No identificado", question.query, respuesta, channel, integrante, telefono,
+            latency_ms=total_latency_ms,
+            ttft_ms=None,
+            input_tokens=0,
+            output_tokens=0,
+            total_tokens=0,
+            fallback=False,
+            error=None
         ))
         return {
             "tramite": "No identificado", "respuesta": respuesta,
@@ -735,47 +1234,215 @@ def ask_core(
             "model_used": MODEL["label"],
         }
 
-    # Llamada al LLM
-    try:
-        respuesta_ia, meta = call_llm(
-            question.query, matched_item, question.history,
-            using_previous_context,
-        )
-    except Exception as e:
-        respuesta_ia = clean_model_text(matched_item["respuesta"])
-        meta = {
-            "latency_ms": 0, "input_tokens": 0, "output_tokens": 0,
-            "total_tokens": 0, "fallback": True, "error": str(e),
-            "model_label": MODEL["label"], "model_id": MODEL["model"],
+    # Registro de log de MLOps
+    logger.info(
+        f"query='{question.query}' "
+        f"canal={channel} "
+        f"integrante={integrante or '-'} "
+        f"matched_ids={matched_ids} "
+        f"rag={USE_RAG} "
+        f"followup={using_previous_context}"
+    )
+
+    # 2. Procesar flujo según cantidad de trámites identificados
+    if len(matched_ids) == 1:
+        matched_item = ID_TO_ITEM[matched_ids[0]]
+        consulta_relevante = extract_relevant_clause(question.query, matched_item)
+        unmatched_clauses = find_unmatched_clauses(question.query)
+
+        try:
+            respuesta_ia, meta = generate_llm_response(
+                consulta_relevante,
+                matched_item,
+                question.history if using_previous_context else [],
+                using_previous_context=using_previous_context
+            )
+            total_input_tokens += meta.get("input_tokens", 0)
+            total_output_tokens += meta.get("output_tokens", 0)
+            if meta.get("fallback"):
+                fallback = True
+            if meta.get("error"):
+                error = meta["error"]
+
+            if response_has_foreign_url(respuesta_ia, matched_item["fuente"]):
+                respuesta_ia = build_single_item_fallback(matched_item)
+                fallback = True
+        except Exception as e:
+            respuesta_ia = clean_model_text(matched_item["respuesta"])
+            fallback = True
+            error = str(e)
+
+        if unmatched_clauses:
+            partes_sin_cubrir = "; ".join(unmatched_clauses)
+            respuesta_ia = (
+                f'Sobre "{partes_sin_cubrir}" no tengo informacion dentro del alcance de ARCO. '
+                f"{respuesta_ia}"
+            )
+
+        total_latency_ms = (time.time() - start_time) * 1000
+        save_metric(base_metric_entry(
+            trace_id, matched_item["titulo"], question.query, respuesta_ia, channel, integrante, telefono,
+            latency_ms=total_latency_ms,
+            ttft_ms=None,
+            input_tokens=total_input_tokens,
+            output_tokens=total_output_tokens,
+            total_tokens=total_input_tokens + total_output_tokens,
+            fallback=fallback,
+            error=error,
+            using_previous_context=using_previous_context
+        ))
+
+        return {
+            "tramite": matched_item["titulo"],
+            "respuesta": respuesta_ia,
+            "respuesta_base": matched_item["respuesta"],
+            "costo": matched_item.get("costo", None),
+            "duracion": matched_item.get("duracion", None),
+            "canal": matched_item["canal"],
+            "presencialidad": matched_item["presencialidad"],
+            "requiere_clave_unica": matched_item["requiere_clave_unica"],
+            "fuente": matched_item["fuente"],
+            "trace_id": trace_id,
+            "model_used": MODEL["label"]
         }
 
+    # Más de un trámite identificado
+    pares_relacionados = any(
+        has_real_relation(matched_ids[i], matched_ids[j])
+        for i in range(len(matched_ids))
+        for j in range(i + 1, len(matched_ids))
+    )
+
+    if not pares_relacionados:
+        concern_matches = [mid for mid in matched_ids if mid in CONCERN_IDS]
+        main_matches = [mid for mid in matched_ids if mid not in CONCERN_IDS]
+
+        if len(main_matches) == 1 and concern_matches:
+            main_item = ID_TO_ITEM[main_matches[0]]
+            concern_items = [ID_TO_ITEM[c] for c in concern_matches]
+
+            respuesta_ia = build_aclaracion_text(main_item, concern_items)
+            try:
+                intro = generate_aclaracion_intro(question.query, main_item, concern_items)
+                if intro:
+                    respuesta_ia = f"{intro} {respuesta_ia}"
+            except Exception as e:
+                logger.warning(f"Error generando intro de aclaracion: {e}")
+
+            total_latency_ms = (time.time() - start_time) * 1000
+            save_metric(base_metric_entry(
+                trace_id, main_item["titulo"], question.query, respuesta_ia, channel, integrante, telefono,
+                latency_ms=total_latency_ms,
+                ttft_ms=None,
+                input_tokens=0,
+                output_tokens=0,
+                total_tokens=0,
+                fallback=False,
+                error=None
+            ))
+
+            return {
+                "modo": "aclaracion",
+                "tramite": main_item["titulo"],
+                "respuesta": respuesta_ia,
+                "respuesta_base": main_item["respuesta"],
+                "costo": main_item.get("costo", None),
+                "duracion": main_item.get("duracion", None),
+                "canal": main_item["canal"],
+                "presencialidad": main_item["presencialidad"],
+                "requiere_clave_unica": main_item["requiere_clave_unica"],
+                "fuente": main_item["fuente"],
+                "trace_id": trace_id,
+                "model_used": MODEL["label"]
+            }
+
+        # Consultas independientes
+        items_independientes = [ID_TO_ITEM[m] for m in matched_ids]
+        consultas = build_independent_responses(question.query, items_independientes, question.history)
+        texto_combinado = "\n\n".join(f"Sobre {c['tramite']}: {c['respuesta']}" for c in consultas)
+
+        total_latency_ms = (time.time() - start_time) * 1000
+        save_metric(base_metric_entry(
+            trace_id, " + ".join(c["tramite"] for c in consultas), question.query, texto_combinado, channel, integrante, telefono,
+            latency_ms=total_latency_ms,
+            ttft_ms=None,
+            input_tokens=0,
+            output_tokens=0,
+            total_tokens=0,
+            fallback=False,
+            error=None
+        ))
+
+        return {
+            "modo": "consultas_independientes",
+            "tramite": " + ".join(c["tramite"] for c in consultas),
+            "respuesta": texto_combinado,
+            "respuesta_base": None,
+            "costo": None,
+            "duracion": None,
+            "canal": None,
+            "presencialidad": None,
+            "requiere_clave_unica": None,
+            "fuente": None,
+            "consultas": consultas,
+            "trace_id": trace_id,
+            "model_used": MODEL["label"]
+        }
+
+    # Plan estructurado (Trámites relacionados con dependencias)
+    expanded_ids = expand_dependencies(matched_ids)
+    ordered_ids = topological_order(expanded_ids)
+    ordered_items = [ID_TO_ITEM[i] for i in ordered_ids if i in ID_TO_ITEM]
+
+    intro = None
+    try:
+        intro = generate_plan_intro(question.query, ordered_items)
+    except Exception as e:
+        logger.warning(f"Error generando intro de plan: {e}")
+
+    plan_text = build_plan_text(ordered_items)
+    respuesta_ia = f"{intro}\n\n{plan_text}" if intro else plan_text
+
+    total_latency_ms = (time.time() - start_time) * 1000
     save_metric(base_metric_entry(
-        trace_id, matched_item["titulo"], question.query, respuesta_ia, channel, integrante, telefono,
-        latency_ms=meta.get("latency_ms", 0),
-        ttft_ms=meta.get("ttft_ms"),
-        input_tokens=meta.get("input_tokens", 0),
-        output_tokens=meta.get("output_tokens", 0),
-        total_tokens=meta.get("total_tokens", 0),
-        fallback=meta.get("fallback", False),
-        error=meta.get("error"),
-        using_previous_context=using_previous_context,
+        trace_id, " + ".join(item["titulo"] for item in ordered_items), question.query, respuesta_ia, channel, integrante, telefono,
+        latency_ms=total_latency_ms,
+        ttft_ms=None,
+        input_tokens=0,
+        output_tokens=0,
+        total_tokens=0,
+        fallback=False,
+        error=None
     ))
 
     return {
-        "tramite":               matched_item["titulo"],
-        "respuesta":             respuesta_ia,
-        "respuesta_base":        matched_item["respuesta"],
-        "costo":                 matched_item.get("costo"),
-        "duracion":              matched_item.get("duracion"),
-        "canal":                 matched_item["canal"],
-        "presencialidad":        matched_item["presencialidad"],
-        "requiere_clave_unica":  matched_item["requiere_clave_unica"],
-        "fuente":                matched_item["fuente"],
-        "trace_id":              trace_id,
-        "model_used":            MODEL["label"],
-        "latency_ms":            round(meta["latency_ms"], 0),
-        "total_tokens":          meta["total_tokens"],
-        "fallback":              meta["fallback"],
+        "modo": "plan",
+        "tramite": " + ".join(item["titulo"] for item in ordered_items),
+        "respuesta": respuesta_ia,
+        "intro": intro,
+        "respuesta_base": None,
+        "costo": None,
+        "duracion": None,
+        "canal": None,
+        "presencialidad": None,
+        "requiere_clave_unica": None,
+        "fuente": None,
+        "plan": [
+            {
+                "orden": i + 1,
+                "tramite": item["titulo"],
+                "respuesta_base": item["respuesta"],
+                "costo": item.get("costo", None),
+                "duracion": item.get("duracion", None),
+                "canal": item["canal"],
+                "presencialidad": item["presencialidad"],
+                "requiere_clave_unica": item["requiere_clave_unica"],
+                "fuente": item["fuente"]
+            }
+            for i, item in enumerate(ordered_items)
+        ],
+        "trace_id": trace_id,
+        "model_used": MODEL["label"]
     }
 
 

@@ -19,7 +19,17 @@
       "primera cedula",
       "cedula vencida",
       "renovar documento identidad",
-      "carnet vencido"
+      "carnet vencido",
+      "renovar mi cedula",
+      "sacar mi cedula",
+      "sacar carnet",
+      "obtener cedula",
+      "se me vencio la cedula",
+      "se me vencio el carnet",
+      "perdi mi cedula",
+      "perdi mi carnet",
+      "cedula perdida",
+      "carnet perdido"
     ],
     "respuesta": "La cedula de identidad acredita la identidad de una persona chilena. Para primera obtencion o renovacion, normalmente debes reservar hora y concurrir a la oficina para captura y retiro del documento.",
     "costo": "$3.820",
@@ -38,7 +48,6 @@
       "extranjeros cedula",
       "cedula para extranjero",
       "cedula extranjero",
-      "cedula para extranjeros",
       "carnet extranjero",
       "renovar carnet extranjero",
       "renovar cedula extranjero",
@@ -49,7 +58,15 @@
       "cedula migrante",
       "identificacion extranjero",
       "cedula residente",
-      "carnet migrante"
+      "carnet migrante",
+      "obtener cedula extranjero",
+      "cedula vencida extranjero",
+      "carnet vencido extranjero",
+      "sacar cedula extranjero",
+      "sacar carnet extranjero",
+      "migrante",
+      "obtener mi identificacion",
+      "mi identificacion"
     ],
     "respuesta": "Permite obtener o renovar la cedula chilena para personas extranjeras. Debes reservar hora y asistir presencialmente con los documentos requeridos.",
     "costo": "$4.270",
@@ -79,7 +96,11 @@
       "tiempo entrega pasaporte",
       "cuanto tarda pasaporte",
       "pasaporte vencido",
-      "renovar documento de viaje"
+      "renovar documento de viaje",
+      "obtener pasaporte",
+      "se me vencio el pasaporte",
+      "sacar mi pasaporte",
+      "pasaporte para viajar"
     ],
     "respuesta": "El pasaporte es el documento de viaje emitido por el Registro Civil. Para obtenerlo o renovarlo, normalmente debes reservar hora y asistir presencialmente a la oficina.",
     "costo": "$69.660 (32 paginas) / $69.740 (64 paginas)",
@@ -106,7 +127,11 @@
       "olvide mi clave unica",
       "clave unica bloqueada",
       "necesito clave unica",
-      "como obtener clave unica"
+      "como obtener clave unica",
+      "no tengo clave unica",
+      "clave unica vencida",
+      "recuperar contraseña del estado",
+      "clave del estado"
     ],
     "respuesta": "La ClaveUnica es la identidad digital para acceder a servicios del Estado. Puede solicitarse por videoconferencia o en oficinas del Registro Civil y luego activarse.",
     "costo": "Gratis",
@@ -114,7 +139,10 @@
     "canal": "online y presencial",
     "presencialidad": "no obligatoria",
     "requiere_clave_unica": "no",
-    "fuente": "https://www.chileatiende.gob.cl/fichas/11331-clave-unica"
+    "fuente": "https://www.chileatiende.gob.cl/fichas/11331-clave-unica",
+    "depende_de": [
+      "cedula_identidad_chilenos"
+    ]
   },
   {
     "id": "certificado_antecedentes",
@@ -133,7 +161,10 @@
       "antecedentes para visa",
       "certificado para postular",
       "hoja de vida delictual",
-      "no tengo antecedentes"
+      "no tengo antecedentes",
+      "certificado antecedentes penales",
+      "hoja de vida",
+      "necesito antecedentes"
     ],
     "respuesta": "El certificado de antecedentes puede descargarse gratis en linea; en oficina del Registro Civil tiene costo. Sirve para acreditar antecedentes para distintos tramites.",
     "costo": "Gratis en linea / $1.050 en oficina",
@@ -158,7 +189,9 @@
       "partida de bautismo",
       "donde naci",
       "fecha de nacimiento certificado",
-      "certificado de origen"
+      "certificado de origen",
+      "necesito certificado de nacimiento",
+      "certificado de nacido"
     ],
     "respuesta": "Acredita los datos de inscripcion del nacimiento. Puede obtenerse para todo tramite, asignacion familiar o matricula.",
     "costo": "Gratis en linea / $710 en oficina",
@@ -184,7 +217,12 @@
       "estado civil casado",
       "partida de matrimonio",
       "certificado para divorcio",
-      "informe matrimonial"
+      "informe matrimonial",
+      "certificado de casamiento",
+      "prueba de matrimonio",
+      "estoy casado",
+      "certificado de soltera",
+      "certificado de soltero"
     ],
     "respuesta": "Permite obtener certificados de matrimonio y algunos informes asociados, como no matrimonio o cese de convivencia, segun corresponda.",
     "costo": "Gratis en linea / $710 en oficina",
@@ -209,7 +247,10 @@
       "certificado para herencia",
       "certificado para pension",
       "tramite por fallecimiento",
-      "registro de muerte"
+      "registro de muerte",
+      "certificado de muerte",
+      "murio",
+      "fallecio"
     ],
     "respuesta": "Acredita legalmente el fallecimiento de una persona o, en su caso, permite solicitar un informe de no defuncion.",
     "costo": "Gratis en linea / $710 en oficina",
@@ -225,7 +266,6 @@
     "keywords": [
       "inscribir nacimiento",
       "inscripcion nacimiento",
-      "inscribir nacimiento",
       "inscripcion de nacimiento",
       "inscribir recien nacido",
       "nacimiento recien nacido",
@@ -236,7 +276,12 @@
       "tramite recien nacido",
       "registrar nacimiento hospital",
       "inscripcion bebe",
-      "plazo inscribir nacimiento"
+      "plazo inscribir nacimiento",
+      "inscribir a mi hijo",
+      "inscribir bebe",
+      "registrar nacimiento",
+      "inscribir a mi bebe",
+      "bebe recien nacido"
     ],
     "respuesta": "Permite inscribir nacimientos ocurridos en Chile en oficinas o suboficinas del Registro Civil, incluyendo las ubicadas en hospitales y clinicas.",
     "costo": "Gratis",
@@ -287,7 +332,10 @@
       "casarse en registro civil",
       "inscribir matrimonio iglesia",
       "matrimonio religioso con efectos civiles",
-      "quiero casarme"
+      "quiero casarme",
+      "sacar hora matrimonio",
+      "agendar matrimonio",
+      "hora para casarme"
     ],
     "respuesta": "Permite reservar hora para celebrar matrimonio civil o para inscribir un matrimonio religioso con efectos civiles.",
     "costo": "Gratis (la celebracion u oficina tiene costo variable segun horario/lugar)",
@@ -313,7 +361,10 @@
       "pareja civil",
       "acuerdo pareja",
       "union civil chile",
-      "registrar pareja"
+      "registrar pareja",
+      "convivientes",
+      "quiero hacer auc",
+      "unirme civilmente"
     ],
     "respuesta": "Permite celebrar un Acuerdo de Union Civil entre dos personas y obtener el estado de convivientes civiles.",
     "costo": "Gratis (en oficina y horario habil)",
@@ -344,7 +395,16 @@
       "compre un auto",
       "cambio dueno auto",
       "registro compraventa vehiculo",
-      "papeles auto nuevo"
+      "papeles auto nuevo",
+      "traspaso",
+      "traspaso vehiculo",
+      "traspaso de vehiculo",
+      "traspaso auto",
+      "traspaso de auto",
+      "traspasar vehiculo",
+      "traspasar auto",
+      "automovil",
+      "hacer un traspaso"
     ],
     "respuesta": "Formaliza la compraventa de un vehiculo motorizado ante un oficial civil del Registro Civil. Normalmente requiere reserva de hora y atencion presencial.",
     "costo": "$6.740 + impuesto 1,5% del valor de venta",
@@ -368,7 +428,11 @@
       "auto destruido",
       "auto robado registro",
       "desregistrar vehiculo",
-      "auto chocado dar de baja"
+      "auto chocado dar de baja",
+      "dar de baja auto",
+      "eliminar vehiculo",
+      "vehiculo robado",
+      "vehiculo destruido"
     ],
     "respuesta": "Permite cancelar la inscripcion de un vehiculo en el Registro de Vehiculos Motorizados, segun la causal correspondiente.",
     "costo": "$1.050",
@@ -393,7 +457,9 @@
       "gravamenes auto",
       "prenda vehiculo",
       "verificar auto antes de comprar",
-      "antecedentes vehiculo"
+      "antecedentes vehiculo",
+      "gravamenes vehiculo",
+      "vehiculo con deuda"
     ],
     "respuesta": "Permite conocer informacion registral relevante del vehiculo, como duenos anteriores y limitaciones al dominio vigentes.",
     "costo": "$1.430",
@@ -417,7 +483,10 @@
       "a nombre de quien esta el auto",
       "certificado propiedad vehiculo",
       "titulo vehiculo",
-      "registro propietario auto"
+      "registro propietario auto",
+      "padron del auto",
+      "documento del vehiculo",
+      "papeles del auto"
     ],
     "respuesta": "El padron contiene los datos del vehiculo y del propietario registrados en el Registro de Vehiculos Motorizados.",
     "costo": "$1.430",
@@ -441,7 +510,16 @@
       "partes pendientes auto",
       "multas pendientes vehiculo",
       "verificar multas auto",
-      "deudas de transito"
+      "deudas de transito",
+      "partes de transito",
+      "multas de auto",
+      "multas pendientes",
+      "tiene multas",
+      "tengo multas",
+      "debo multas",
+      "auto con multas",
+      "vehiculo con multas",
+      "debo partes"
     ],
     "respuesta": "Permite consultar y acreditar si un vehiculo registra multas de transito no pagadas inscritas en el registro correspondiente.",
     "costo": "$1.430",
@@ -487,7 +565,8 @@
       "ocultar antecedentes",
       "antecedentes no aparezcan",
       "excluir antecedentes certificado",
-      "antecedentes no visibles"
+      "antecedentes no visibles",
+      "que no aparezcan mis antecedentes"
     ],
     "respuesta": "Permite solicitar que algunas anotaciones no sean incluidas en los certificados de antecedentes penales, segun corresponda.",
     "costo": "$4.270",
@@ -513,7 +592,9 @@
       "bienes fallecido",
       "como heredar",
       "solicitar herencia registro civil",
-      "posesion efectiva bienes"
+      "posesion efectiva bienes",
+      "herencia",
+      "murio sin testamento"
     ],
     "respuesta": "Permite solicitar la posesion efectiva de una herencia cuando la persona fallecida no dejo testamento.",
     "costo": "Variable (desde Gratis hasta 2,5 UTM segun valor masa hereditaria)",
@@ -541,7 +622,9 @@
       "tramite cambio nombre",
       "cambiar nombre legal",
       "apellido equivocado",
-      "corregir apellido"
+      "corregir apellido",
+      "cambiarme el nombre",
+      "cambiar mi apellido"
     ],
     "respuesta": "Permite solicitar el cambio de nombre y/o apellido y la rectificacion correspondiente en la partida de nacimiento.",
     "costo": "$4.270 (Sujeto a resolucion judicial o administrativa)",
