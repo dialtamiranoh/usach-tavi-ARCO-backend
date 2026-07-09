@@ -59,7 +59,10 @@ SYSTEM_PROMPT = _prompts_data["versiones"][_version_activa]["system_prompt"]
 
 # Carpetas donde se buscan .gguf por defecto. Se puede agregar más vía
 # DASHBOARD_MODEL_DIRS (separadas por ";") o desde la propia UI (extra_dirs).
-_default_dirs = [BASE_DIR.parent / "modelos"]
+_default_dirs = [
+    BASE_DIR.parent / "modelos",
+    Path("C:/Users/diego.altamirano/models")
+]
 _env_dirs = [Path(p) for p in os.getenv("DASHBOARD_MODEL_DIRS", "").split(";") if p.strip()]
 MODEL_SEARCH_DIRS = _default_dirs + _env_dirs
 

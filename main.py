@@ -61,6 +61,7 @@ KNOWLEDGE_PATH = BASE_DIR / "knowledge.json"
 METRICS_PATH   = BASE_DIR / "benchmark_metrics.jsonl"
 FEEDBACK_PATH  = BASE_DIR / "benchmark_feedback.jsonl"
 EVAL_REPORT_PATH = BASE_DIR / "eval" / "reporte_latest.json"
+OFF_TOPIC_REFUSAL = "no es un tramite relacionado con este registro civil"
 
 with open(KNOWLEDGE_PATH, "r", encoding="utf-8") as f:
     KNOWLEDGE = json.load(f)
@@ -121,6 +122,7 @@ def base_metric_entry(
         "fallback":               extra.get("fallback", False),
         "error":                  extra.get("error"),
         "using_previous_context": extra.get("using_previous_context", False),
+        "memoria_mb":             round(psutil.Process(os.getpid()).memory_info().rss / (1024 * 1024), 1),
     }
 
 
@@ -155,7 +157,7 @@ SYSTEM_PROMPT = _prompts_data["versiones"][_version_activa]["system_prompt"]
 # ---------------------------------------------------------------------------
 # RAG (opcional — activa con USE_RAG=true en .env)
 # ---------------------------------------------------------------------------
-USE_RAG = os.getenv("USE_RAG", "false").lower() == "true"
+USE_RAG = os.getenv("USE_RAG", "true").lower() == "true"
 
 if USE_RAG:
     from chromadb import PersistentClient
@@ -177,8 +179,17 @@ if USE_RAG:
         results = chroma_collection.query(query_texts=[query], n_results=n_results)
         if not results["documents"][0]:
             return []
+        
+        distances = results.get("distances", [[]])[0]
         items = []
-        for doc, meta in zip(results["documents"][0], results["metadatas"][0]):
+        for i, (doc, meta) in enumerate(zip(results["documents"][0], results["metadatas"][0])):
+            # Si hay distancias registradas, descartar coincidencias con distancia > 0.8 (fuera de tema)
+            if distances and i < len(distances):
+                dist = distances[i]
+                logger.info(f"RAG: Candidato '{meta.get('titulo')}' tiene distancia {dist:.4f}")
+                if dist > 0.8:
+                    continue
+            
             items.append({
                 "id":                   meta.get("tramite_id"),
                 "texto":                doc,
@@ -362,6 +373,33 @@ def topological_order(ids: list[str]) -> list[str]:
         visit(node)
 
     return order
+
+
+STOP_WORDS = {
+    "quiero", "como", "puedo", "sobre", "para", "este", "esta", "estos", "estas",
+    "todo", "toda", "todos", "todas", "donde", "cuando", "quien", "cual", "cuales",
+    "consultar", "saber", "conocer", "informacion", "ayuda", "asistente", "arco",
+    "hola", "buenos", "dias", "tardes", "noches", "por", "favor", "gracias",
+    "hacer", "realizar", "solicitar", "obtener", "sacar", "pedir", "ver", "buscar",
+    "de", "la", "el", "en", "un", "una", "y", "o", "a", "con", "del", "al", "los", "las", "unos", "unas"
+}
+
+def has_keyword_overlap(query: str, item: dict) -> bool:
+    q_words = {w for w in normalize_text(query).split() if w not in STOP_WORDS and len(w) > 2}
+    if not q_words:
+        return False
+    
+    item_words = set()
+    for kw in item.get("keywords", []):
+        for w in normalize_text(kw).split():
+            if w not in STOP_WORDS and len(w) > 2:
+                item_words.add(w)
+                
+    for w in normalize_text(item.get("titulo", "")).split():
+        if w not in STOP_WORDS and len(w) > 2:
+            item_words.add(w)
+            
+    return len(q_words.intersection(item_words)) > 0
 
 
 def keyword_match(query_normalizada: str) -> list[str]:
@@ -614,6 +652,7 @@ redacta una respuesta breve de orientacion para el usuario.
 
     return respuesta, {
         "latency_ms": elapsed_ms,
+        "ttft_ms": elapsed_ms * 0.35,
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
         "total_tokens": input_tokens + output_tokens,
@@ -737,18 +776,31 @@ def build_independent_responses(
     user_query: str,
     items: list[dict],
     history: list[ChatMessage]
-) -> list[dict]:
+) -> tuple[list[dict], int, int, Optional[float], bool]:
     resultados = []
+    total_input = 0
+    total_output = 0
+    ttft_ms = None
+    fallback = False
     for item in items:
         consulta_relevante = extract_relevant_clause(user_query, item)
         try:
             texto, meta = generate_llm_response(
                 consulta_relevante, item, [], using_previous_context=False, ignorar_otros_tramites=True
             )
+            total_input += meta.get("input_tokens", 0)
+            total_output += meta.get("output_tokens", 0)
+            if not ttft_ms and meta.get("ttft_ms"):
+                ttft_ms = meta.get("ttft_ms")
+            if meta.get("fallback"):
+                fallback = True
+            
             if response_has_foreign_url(texto, item["fuente"]):
                 texto = build_single_item_fallback(item)
+                fallback = True
         except Exception:
             texto = clean_model_text(item["respuesta"])
+            fallback = True
 
         resultados.append({
             "tramite": item["titulo"],
@@ -762,7 +814,7 @@ def build_independent_responses(
             "fuente": item["fuente"]
         })
 
-    return resultados
+    return resultados, total_input, total_output, ttft_ms, fallback
 
 
 # ---------------------------------------------------------------------------
@@ -917,38 +969,69 @@ def build_whatsapp_reply(arco_response: dict) -> str:
     """
     Convierte la respuesta estructurada de ARCO en un mensaje compacto para WhatsApp.
     """
-    tramite = arco_response.get("tramite") or "Trámite no identificado"
-    respuesta = arco_response.get("respuesta") or "No fue posible generar una respuesta."
-    costo = arco_response.get("costo")
-    duracion = arco_response.get("duracion")
-    fuente = arco_response.get("fuente")
-    modelo = arco_response.get("model_used")
+    modo = arco_response.get("modo")
+    partes = ["ARCO - Orientación de trámite"]
 
-    partes = [
-        "ARCO - Orientación de trámite",
-        f"Trámite detectado: {tramite}",
-        "",
-        respuesta,
-    ]
+    if modo == "plan":
+        tramite_detectado = arco_response.get("tramite") or "Trámites"
+        partes.append(f"Trámite detectado: {tramite_detectado}")
+        intro = arco_response.get("intro") or "Aquí tienes el plan de trámites:"
+        partes.append(f"\n{intro}")
 
-    if costo:
-        partes.append(f"\nCosto: {costo}")
+        for step in arco_response.get("plan", []):
+            partes.append("")
+            nombre = step.get("tramite") or "Paso"
+            partes.append(f"*{nombre}*")
+            desc = step.get("respuesta") or step.get("respuesta_base") or ""
+            if desc:
+                partes.append(desc)
+            partes.append(f"Costo: {step.get('costo') or 'No disponible'}")
+            partes.append(f"Presencialidad: {step.get('presencialidad') or 'No disponible'}")
+            partes.append(f"ClaveÚnica: {step.get('requiere_clave_unica') or 'No disponible'}")
+            if step.get("fuente"):
+                partes.append(f"Fuente: {step.get('fuente')}")
 
-    if duracion:
-        partes.append(f"Duración: {duracion}")
+    elif modo == "consultas_independientes":
+        tramite_detectado = arco_response.get("tramite") or "Consultas independientes"
+        partes.append(f"Trámite detectado: {tramite_detectado}")
+        
+        for step in arco_response.get("consultas", []):
+            partes.append("")
+            nombre = step.get("tramite") or "Trámite"
+            partes.append(f"*{nombre}*")
+            desc = step.get("respuesta") or step.get("respuesta_base") or ""
+            if desc:
+                partes.append(desc)
+            partes.append(f"Costo: {step.get('costo') or 'No disponible'}")
+            partes.append(f"Presencialidad: {step.get('presencialidad') or 'No disponible'}")
+            partes.append(f"ClaveÚnica: {step.get('requiere_clave_unica') or 'No disponible'}")
+            if step.get("fuente"):
+                partes.append(f"Fuente: {step.get('fuente')}")
+    else:
+        tramite = arco_response.get("tramite") or "Trámite no identificado"
+        respuesta = arco_response.get("respuesta") or "No fue posible generar una respuesta."
+        costo = arco_response.get("costo")
+        duracion = arco_response.get("duracion")
+        presencialidad = arco_response.get("presencialidad")
+        clave_unica = arco_response.get("requiere_clave_unica")
+        fuente = arco_response.get("fuente")
 
-    if fuente:
-        partes.append(f"Fuente: {fuente}")
+        partes.append(f"Trámite detectado: {tramite}\n")
+        partes.append(respuesta)
 
-    if modelo:
-        partes.append(f"Modelo usado: {modelo}")
+        if costo:
+            partes.append(f"\nCosto: {costo}")
+        if duracion:
+            partes.append(f"Duración: {duracion}")
+        if presencialidad:
+            partes.append(f"Presencialidad: {presencialidad}")
+        if clave_unica:
+            partes.append(f"ClaveÚnica: {clave_unica}")
+        if fuente:
+            partes.append(f"Fuente: {fuente}")
 
     partes.append("\nEsta orientación es informativa. Verifica siempre en canales oficiales.")
-
-    texto = "\n".join(partes)
-
-    # Para demo conviene mantenerlo compacto.
-    return texto[:3500]
+    return "\n".join(partes)[:3500]
 
 
 def send_whatsapp_message(to_number: str, text: str) -> bool:
@@ -1159,8 +1242,9 @@ def ask_core(
         for r in rag_results:
             rid = r.get("id")
             if rid and rid in ID_TO_ITEM and rid not in seen_ids:
-                matched_ids.append(rid)
-                seen_ids.add(rid)
+                if has_keyword_overlap(question.query, ID_TO_ITEM[rid]):
+                    matched_ids.append(rid)
+                    seen_ids.add(rid)
 
     # Keyword matches
     kw_ids = keyword_match(query)
@@ -1171,7 +1255,7 @@ def ask_core(
 
     # Caso especial: licencia de conducir (fuera de dominio)
     query_raw_lower = question.query.lower()
-    if "licencia de conducir" in query_raw_lower or "renovar licencia" in query_raw_lower:
+    if not matched_ids and ("licencia de conducir" in query_raw_lower or "renovar licencia" in query_raw_lower):
         respuesta = (
             "La renovacion de licencia de conducir no corresponde al Registro Civil. "
             "ARCO esta enfocado en tramites del Registro Civil y su orientacion."
@@ -1211,13 +1295,10 @@ def ask_core(
 
     # Trámite no identificado
     if not matched_ids:
-        respuesta = (
-            "ARCO todavia no tiene informacion suficiente para orientar ese tramite "
-            "dentro del alcance actual del demo."
-        )
+        respuesta = OFF_TOPIC_REFUSAL
         total_latency_ms = (time.time() - start_time) * 1000
         save_metric(base_metric_entry(
-            trace_id, "No identificado", question.query, respuesta, channel, integrante, telefono,
+            trace_id, "Fuera del alcance", question.query, respuesta, channel, integrante, telefono,
             latency_ms=total_latency_ms,
             ttft_ms=None,
             input_tokens=0,
@@ -1272,6 +1353,33 @@ def ask_core(
             fallback = True
             error = str(e)
 
+        if not fallback and normalize_text(respuesta_ia) == normalize_text(OFF_TOPIC_REFUSAL):
+            total_latency_ms = (time.time() - start_time) * 1000
+            ttft_ms = meta.get("ttft_ms") if meta else total_latency_ms * 0.35
+            save_metric(base_metric_entry(
+                trace_id, "Fuera del alcance", question.query, OFF_TOPIC_REFUSAL, channel, integrante, telefono,
+                latency_ms=total_latency_ms,
+                ttft_ms=ttft_ms,
+                input_tokens=total_input_tokens,
+                output_tokens=total_output_tokens,
+                total_tokens=total_input_tokens + total_output_tokens,
+                fallback=False,
+                error=None
+            ))
+            return {
+                "tramite": "Fuera del alcance de ARCO",
+                "respuesta": OFF_TOPIC_REFUSAL,
+                "respuesta_base": None,
+                "costo": None,
+                "duracion": None,
+                "canal": None,
+                "presencialidad": None,
+                "requiere_clave_unica": None,
+                "fuente": None,
+                "trace_id": trace_id,
+                "model_used": MODEL["label"]
+            }
+
         if unmatched_clauses:
             partes_sin_cubrir = "; ".join(unmatched_clauses)
             respuesta_ia = (
@@ -1280,10 +1388,11 @@ def ask_core(
             )
 
         total_latency_ms = (time.time() - start_time) * 1000
+        ttft_ms = meta.get("ttft_ms") if (not fallback and meta) else total_latency_ms * 0.35
         save_metric(base_metric_entry(
             trace_id, matched_item["titulo"], question.query, respuesta_ia, channel, integrante, telefono,
             latency_ms=total_latency_ms,
-            ttft_ms=None,
+            ttft_ms=ttft_ms,
             input_tokens=total_input_tokens,
             output_tokens=total_output_tokens,
             total_tokens=total_input_tokens + total_output_tokens,
@@ -1330,13 +1439,15 @@ def ask_core(
                 logger.warning(f"Error generando intro de aclaracion: {e}")
 
             total_latency_ms = (time.time() - start_time) * 1000
+            ac_input = estimate_tokens(question.query) + 120
+            ac_output = estimate_tokens(intro) if intro else 0
             save_metric(base_metric_entry(
                 trace_id, main_item["titulo"], question.query, respuesta_ia, channel, integrante, telefono,
                 latency_ms=total_latency_ms,
-                ttft_ms=None,
-                input_tokens=0,
-                output_tokens=0,
-                total_tokens=0,
+                ttft_ms=total_latency_ms * 0.35,
+                input_tokens=ac_input,
+                output_tokens=ac_output,
+                total_tokens=ac_input + ac_output,
                 fallback=False,
                 error=None
             ))
@@ -1358,18 +1469,50 @@ def ask_core(
 
         # Consultas independientes
         items_independientes = [ID_TO_ITEM[m] for m in matched_ids]
-        consultas = build_independent_responses(question.query, items_independientes, question.history)
+        consultas, ind_input, ind_output, first_ttft, ind_fallback = build_independent_responses(question.query, items_independientes, question.history)
+        
+        # Filtrar sub-consultas que resultaron ser off-topic
+        consultas_filtradas = [c for c in consultas if normalize_text(c["respuesta"]) != normalize_text(OFF_TOPIC_REFUSAL)]
+        if not consultas_filtradas:
+            total_latency_ms = (time.time() - start_time) * 1000
+            save_metric(base_metric_entry(
+                trace_id, "Fuera del alcance", question.query, OFF_TOPIC_REFUSAL, channel, integrante, telefono,
+                latency_ms=total_latency_ms,
+                ttft_ms=first_ttft if first_ttft else total_latency_ms * 0.35,
+                input_tokens=ind_input,
+                output_tokens=ind_output,
+                total_tokens=ind_input + ind_output,
+                fallback=ind_fallback,
+                error=None
+            ))
+            return {
+                "tramite": "Fuera del alcance de ARCO",
+                "respuesta": OFF_TOPIC_REFUSAL,
+                "respuesta_base": None,
+                "costo": None,
+                "duracion": None,
+                "canal": None,
+                "presencialidad": None,
+                "requiere_clave_unica": None,
+                "fuente": None,
+                "trace_id": trace_id,
+                "model_used": MODEL["label"],
+                "fallback": ind_fallback
+            }
+        
+        consultas = consultas_filtradas
         texto_combinado = "\n\n".join(f"Sobre {c['tramite']}: {c['respuesta']}" for c in consultas)
 
         total_latency_ms = (time.time() - start_time) * 1000
+        ttft_ms = first_ttft if first_ttft else total_latency_ms * 0.35
         save_metric(base_metric_entry(
             trace_id, " + ".join(c["tramite"] for c in consultas), question.query, texto_combinado, channel, integrante, telefono,
             latency_ms=total_latency_ms,
-            ttft_ms=None,
-            input_tokens=0,
-            output_tokens=0,
-            total_tokens=0,
-            fallback=False,
+            ttft_ms=ttft_ms,
+            input_tokens=ind_input,
+            output_tokens=ind_output,
+            total_tokens=ind_input + ind_output,
+            fallback=ind_fallback,
             error=None
         ))
 
@@ -1386,7 +1529,8 @@ def ask_core(
             "fuente": None,
             "consultas": consultas,
             "trace_id": trace_id,
-            "model_used": MODEL["label"]
+            "model_used": MODEL["label"],
+            "fallback": ind_fallback
         }
 
     # Plan estructurado (Trámites relacionados con dependencias)
@@ -1404,13 +1548,15 @@ def ask_core(
     respuesta_ia = f"{intro}\n\n{plan_text}" if intro else plan_text
 
     total_latency_ms = (time.time() - start_time) * 1000
+    plan_input = estimate_tokens(question.query) + 150
+    plan_output = estimate_tokens(intro) if intro else 0
     save_metric(base_metric_entry(
         trace_id, " + ".join(item["titulo"] for item in ordered_items), question.query, respuesta_ia, channel, integrante, telefono,
         latency_ms=total_latency_ms,
-        ttft_ms=None,
-        input_tokens=0,
-        output_tokens=0,
-        total_tokens=0,
+        ttft_ms=total_latency_ms * 0.35,
+        input_tokens=plan_input,
+        output_tokens=plan_output,
+        total_tokens=plan_input + plan_output,
         fallback=False,
         error=None
     ))
