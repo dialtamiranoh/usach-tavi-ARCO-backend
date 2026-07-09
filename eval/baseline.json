@@ -1,0 +1,99 @@
+{
+  "total_casos": 10,
+  "correctos": 8,
+  "accuracy": 0.8,
+  "accuracy_minima": 0.9,
+  "aprobado": false,
+  "resultados": [
+    {
+      "id": "TC-01",
+      "query": "quiero sacar pasaporte",
+      "tramite_esperado": "Pasaporte",
+      "tramite_obtenido": "Pasaporte",
+      "tramite_correcto": true,
+      "keywords_ok": false,
+      "paso": true
+    },
+    {
+      "id": "TC-02",
+      "query": "cuanto cuesta el certificado de antecedentes",
+      "tramite_esperado": "Certificado de antecedentes",
+      "tramite_obtenido": "Certificado de antecedentes",
+      "tramite_correcto": true,
+      "keywords_ok": true,
+      "paso": true
+    },
+    {
+      "id": "TC-03",
+      "query": "renovar carnet de identidad",
+      "tramite_esperado": "Cedula de identidad para chilenos",
+      "tramite_obtenido": "Cedula de identidad para chilenos",
+      "tramite_correcto": true,
+      "keywords_ok": false,
+      "paso": true
+    },
+    {
+      "id": "TC-04",
+      "query": "soy migrante y quiero obtener mi identificacion",
+      "tramite_esperado": "Cedula de identidad para extranjeros",
+      "tramite_obtenido": "No identificado",
+      "tramite_correcto": false,
+      "keywords_ok": false,
+      "paso": false
+    },
+    {
+      "id": "TC-05",
+      "query": "sacar clave unica",
+      "tramite_esperado": "ClaveUnica",
+      "tramite_obtenido": "ClaveUnica",
+      "tramite_correcto": true,
+      "keywords_ok": false,
+      "paso": true
+    },
+    {
+      "id": "TC-06",
+      "query": "transferir un vehiculo",
+      "tramite_esperado": "Transferencia de dominio de vehiculos motorizados ante un oficial civil",
+      "tramite_obtenido": "Transferencia de dominio de vehiculos motorizados ante un oficial civil",
+      "tramite_correcto": true,
+      "keywords_ok": true,
+      "paso": true
+    },
+    {
+      "id": "TC-07",
+      "query": "inscribir a mi bebe recien nacido en el registro civil",
+      "tramite_esperado": "Inscripcion de nacimiento",
+      "tramite_obtenido": "No identificado",
+      "tramite_correcto": false,
+      "keywords_ok": false,
+      "paso": false
+    },
+    {
+      "id": "TC-08",
+      "query": "sacar certificado de nacimiento",
+      "tramite_esperado": "Certificado de nacimiento",
+      "tramite_obtenido": "Certificado de nacimiento",
+      "tramite_correcto": true,
+      "keywords_ok": false,
+      "paso": true
+    },
+    {
+      "id": "TC-09",
+      "query": "casarse en el registro civil",
+      "tramite_esperado": "Reservar hora para matrimonio civil o inscripcion del matrimonio religioso",
+      "tramite_obtenido": "Reservar hora para matrimonio civil o inscripcion del matrimonio religioso",
+      "tramite_correcto": true,
+      "keywords_ok": false,
+      "paso": true
+    },
+    {
+      "id": "TC-10",
+      "query": "quiero renovar licencia de conducir",
+      "tramite_esperado": "Fuera del alcance de ARCO",
+      "tramite_obtenido": "Fuera del alcance de ARCO",
+      "tramite_correcto": true,
+      "keywords_ok": true,
+      "paso": true
+    }
+  ]
+}
